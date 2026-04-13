@@ -1,6 +1,18 @@
 "use client";
 
-import { MODELS } from "@/lib/models";
+import { useEffect, useState } from "react";
+
+interface AvailableModel {
+  id: string;
+  name: string;
+  provider: string;
+}
+
+const PROVIDER_LABELS: Record<string, string> = {
+  anthropic: "Claude",
+  openai: "OpenAI",
+  google: "Google",
+};
 
 const PROVIDER_COLORS: Record<string, string> = {
   anthropic: "bg-[#D97706]/10 text-[#D97706]",
@@ -14,7 +26,30 @@ interface ModelSelectorProps {
 }
 
 export function ModelSelector({ value, onChange }: ModelSelectorProps) {
-  const selected = MODELS.find((m) => m.id === value) || MODELS[0];
+  const [models, setModels] = useState<AvailableModel[]>([]);
+
+  useEffect(() => {
+    fetch("/api/models")
+      .then((r) => r.json())
+      .then((data: AvailableModel[]) => {
+        setModels(data);
+        // If current model isn't available, switch to first available
+        if (data.length > 0 && !data.some((m) => m.id === value)) {
+          onChange(data[0].id);
+        }
+      })
+      .catch(() => {
+        // Fallback — show nothing, user can still type
+      });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const selected = models.find((m) => m.id === value) || models[0];
+
+  if (models.length === 0) {
+    return (
+      <span className="text-xs text-[#6B6B6B] px-2">Loading models...</span>
+    );
+  }
 
   return (
     <div className="relative">
@@ -23,7 +58,7 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
         onChange={(e) => onChange(e.target.value)}
         className="appearance-none pl-3 pr-8 py-1.5 rounded-lg border border-[#E5E3DC] dark:border-[#333333] bg-white dark:bg-[#262626] text-sm text-[#1A1A1A] dark:text-[#E8E8E8] cursor-pointer focus:outline-none focus:ring-2 focus:ring-[#D97706]/40"
       >
-        {MODELS.map((model) => (
+        {models.map((model) => (
           <option key={model.id} value={model.id}>
             {model.name}
           </option>
@@ -46,15 +81,13 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
           />
         </svg>
       </div>
-      <span
-        className={`absolute -top-1 -right-1 text-[9px] px-1 rounded font-medium ${PROVIDER_COLORS[selected.provider]}`}
-      >
-        {selected.provider === "anthropic"
-          ? "Claude"
-          : selected.provider === "openai"
-          ? "OpenAI"
-          : "Google"}
-      </span>
+      {selected && (
+        <span
+          className={`absolute -top-1 -right-1 text-[9px] px-1 rounded font-medium ${PROVIDER_COLORS[selected.provider] || ""}`}
+        >
+          {PROVIDER_LABELS[selected.provider] || selected.provider}
+        </span>
+      )}
     </div>
   );
 }

@@ -19,26 +19,34 @@ const requestSchema = z.object({
   }),
 });
 
+const PROVIDER_KEY_MAP = {
+  anthropic: "ANTHROPIC_API_KEY",
+  openai: "OPENAI_API_KEY",
+  google: "GOOGLE_GENERATIVE_AI_API_KEY",
+} as const;
+
 function getLanguageModel(modelId: string) {
   const config = getModelConfig(modelId);
+  const envKey = PROVIDER_KEY_MAP[config.provider];
+  const apiKey = process.env[envKey];
+
+  if (!apiKey) {
+    throw new Error(
+      `API key not configured for ${config.name}. Set ${envKey} in .env.local`
+    );
+  }
 
   switch (config.provider) {
     case "anthropic": {
-      const anthropic = createAnthropic({
-        apiKey: process.env.ANTHROPIC_API_KEY,
-      });
+      const anthropic = createAnthropic({ apiKey });
       return anthropic(config.modelId);
     }
     case "openai": {
-      const openai = createOpenAI({
-        apiKey: process.env.OPENAI_API_KEY,
-      });
+      const openai = createOpenAI({ apiKey });
       return openai(config.modelId);
     }
     case "google": {
-      const google = createGoogleGenerativeAI({
-        apiKey: process.env.GOOGLE_GENERATIVE_AI_API_KEY,
-      });
+      const google = createGoogleGenerativeAI({ apiKey });
       return google(config.modelId);
     }
     default: {
@@ -93,7 +101,17 @@ export async function POST(req: Request) {
   }
 
   const { messages, model: modelId } = parsed.data;
-  const languageModel = getLanguageModel(modelId);
+
+  let languageModel;
+  try {
+    languageModel = getLanguageModel(modelId);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : "Model not available";
+    return new Response(JSON.stringify({ error: msg }), {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
 
   const result = streamText({
     model: languageModel,
