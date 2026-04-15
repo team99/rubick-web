@@ -1,11 +1,70 @@
 "use client";
 
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { UIMessage } from "ai";
 
-function ToolStatus({ input, isComplete }: { input: Record<string, unknown>; isComplete: boolean }) {
-  const index = String(input?.index || "unknown");
+const mdComponents: Components = {
+  table: ({ children }) => (
+    <table className="w-full text-sm border-separate border-spacing-0 rounded-lg overflow-hidden border border-[#E5E3DC] dark:border-[#333333] my-3">
+      {children}
+    </table>
+  ),
+  thead: ({ children }) => (
+    <thead className="bg-[#F5F2EB] dark:bg-[#D97706]/15">{children}</thead>
+  ),
+  th: ({ children }) => (
+    <th className="text-left font-semibold text-[#1A1A1A] dark:text-[#D97706] px-4 py-2.5 border-b border-[#E5E3DC] dark:border-[#D97706]/20">
+      {children}
+    </th>
+  ),
+  td: ({ children }) => (
+    <td className="px-4 py-2 border-b border-[#F0EDE8] dark:border-[#2A2A2A] text-[#1A1A1A] dark:text-[#E8E8E8]">
+      {children}
+    </td>
+  ),
+  tr: ({ children, ...props }) => {
+    // @ts-expect-error -- node not typed
+    const isHead = props.node?.parentNode?.tagName === "thead";
+    return <tr className={isHead ? "" : "hover:bg-[#F5F2EB]/50 dark:hover:bg-[#262626]/50 even:bg-[#FAFAF8] dark:even:bg-[#1E1E1E] [&:last-child_td]:border-b-0"}>{children}</tr>;
+  },
+  p: ({ children }) => (
+    <p className="text-[#1A1A1A] dark:text-[#E8E8E8] my-2">{children}</p>
+  ),
+  strong: ({ children }) => (
+    <strong className="font-semibold text-[#1A1A1A] dark:text-[#E8E8E8]">{children}</strong>
+  ),
+  h1: ({ children }) => <h1 className="text-xl font-bold text-[#1A1A1A] dark:text-[#E8E8E8] mt-4 mb-2">{children}</h1>,
+  h2: ({ children }) => <h2 className="text-lg font-bold text-[#1A1A1A] dark:text-[#E8E8E8] mt-4 mb-2">{children}</h2>,
+  h3: ({ children }) => <h3 className="text-base font-bold text-[#1A1A1A] dark:text-[#E8E8E8] mt-3 mb-1">{children}</h3>,
+  ul: ({ children }) => <ul className="list-disc pl-5 my-2 text-[#1A1A1A] dark:text-[#E8E8E8]">{children}</ul>,
+  ol: ({ children }) => <ol className="list-decimal pl-5 my-2 text-[#1A1A1A] dark:text-[#E8E8E8]">{children}</ol>,
+  li: ({ children }) => <li className="my-0.5">{children}</li>,
+  code: ({ children, className }) => {
+    const isBlock = className?.includes("language-");
+    if (isBlock) {
+      return <code className={`${className} block`}>{children}</code>;
+    }
+    return <code className="bg-[#F5F2EB] dark:bg-[#262626] px-1 py-0.5 rounded text-sm">{children}</code>;
+  },
+  pre: ({ children }) => (
+    <pre className="bg-[#F5F2EB] dark:bg-[#1E1E1E] border border-[#E5E3DC] dark:border-[#333333] rounded-lg p-3 overflow-x-auto my-3 text-sm">
+      {children}
+    </pre>
+  ),
+};
+
+
+function ToolStatus({ toolType, input, isComplete }: { toolType: string; input: Record<string, unknown>; isComplete: boolean }) {
+  let label: string;
+  if (toolType === "get_schema") {
+    const indices = (input?.indices as string[]) || [];
+    const names = indices.join(", ") || "schemas";
+    label = isComplete ? `Loaded ${names}` : `Loading ${names}...`;
+  } else {
+    const index = String(input?.index || "unknown");
+    label = isComplete ? `Queried ${index}` : `Querying ${index}...`;
+  }
 
   return (
     <div className="my-1.5 flex items-center gap-2 text-xs text-[#6B6B6B]">
@@ -16,7 +75,7 @@ function ToolStatus({ input, isComplete }: { input: Record<string, unknown>; isC
       ) : (
         <div className="animate-spin h-3 w-3 border border-[#D97706] border-t-transparent rounded-full shrink-0" />
       )}
-      <span>{isComplete ? `Queried ${index}` : `Querying ${index}...`}</span>
+      <span>{label}</span>
     </div>
   );
 }
@@ -106,12 +165,10 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
             const text = (part as { type: "text"; text: string }).text;
             if (!text) return null;
             return (
-              <div
-                key={i}
-                className="prose prose-sm dark:prose-invert max-w-none prose-headings:text-[#1A1A1A] dark:prose-headings:text-[#E8E8E8] prose-p:text-[#1A1A1A] dark:prose-p:text-[#E8E8E8] prose-code:bg-[#F5F2EB] dark:prose-code:bg-[#262626] prose-code:px-1 prose-code:py-0.5 prose-code:rounded prose-code:text-sm prose-pre:bg-[#F5F2EB] dark:prose-pre:bg-[#1E1E1E] prose-pre:border prose-pre:border-[#E5E3DC] dark:prose-pre:border-[#333333] prose-table:text-sm prose-th:bg-[#F5F5F0] dark:prose-th:bg-[#262626] prose-th:px-3 prose-th:py-2 prose-td:px-3 prose-td:py-2 prose-td:border-[#E5E3DC] dark:prose-td:border-[#333333]"
-              >
+              <div key={i}>
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
+                  components={mdComponents}
                   disallowedElements={["script", "iframe", "object", "embed"]}
                 >
                   {text}
@@ -124,7 +181,8 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
           if (part.type.startsWith("tool-") || part.type === "dynamic-tool") {
             const { input, output, state } = getToolInfo(part);
             const isComplete = state === "result" || !!output || !isStreaming || i < parts.length - 1;
-            return <ToolStatus key={i} input={input} isComplete={isComplete} />;
+            const toolType = part.type.startsWith("tool-") ? part.type.slice(5) : "unknown";
+            return <ToolStatus key={i} toolType={toolType} input={input} isComplete={isComplete} />;
           }
 
           return null;

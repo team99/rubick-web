@@ -4,7 +4,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { z } from "zod";
 import { getModelConfig, MODELS } from "@/lib/models";
-import { getESContext } from "@/lib/es-context";
+import { getSlimContext, getSchemaFiles, getSchemaFileList } from "@/lib/es-context";
 import { executeESQuery } from "@/lib/es-client";
 import { verifyAuth } from "@/lib/auth";
 
@@ -56,34 +56,39 @@ function getLanguageModel(modelId: string) {
   }
 }
 
-const SYSTEM_PROMPT = `You are Rubick, a data assistant for Rumah123 and iProperty. You help users query and analyze data from Elasticsearch indices.
+function buildSystemPrompt(): string {
+  const schemaIds = getSchemaFileList();
+  return `You are Rubick, a data assistant for Rumah123 and iProperty. You help users query and analyze data from Elasticsearch indices.
 
-You have access to an Elasticsearch cluster with production data. When users ask questions about data, you should:
+You have two tools:
+1. **get_schema** — Load detailed field documentation for specific indices. Call this FIRST before querying to learn exact field names, types, and enum values. Available schemas: ${schemaIds.join(", ")}
+2. **execute_es_query** — Execute an Elasticsearch query.
 
-1. Understand what they're asking based on the schema context provided below
-2. Use the execute_es_query tool to run Elasticsearch queries
-3. Analyze the results and present them in a clear, readable format
-4. Use tables for tabular data, lists for enumerations, and bold for key numbers
+Workflow:
+1. Read the index overview below to identify which indices you need
+2. Call get_schema to load their detailed schemas (typically 1-3 indices)
+3. Call execute_es_query with accurate field names from the schema
+4. Present results clearly with tables, bold numbers, and concise summaries
+
+For simple queries using only fields listed in the "Key Fields per Index" table below (e.g., count by date, filter by status), you may skip get_schema and query directly.
 
 Important guidelines:
-- Always use the correct index name from the schema documentation
-- Use "filter" context in bool queries for exact matches (it's faster)
+- Always briefly explain your plan before calling tools (e.g., "I'll query the enquiries index for this month's data, then look up agent names.")
+- Between tool calls, briefly explain what you found and what you'll do next
+- Use "filter" context in bool queries for exact matches (faster, cacheable)
 - Always exclude deleted records with instance_info.is_removed: false where applicable
 - For active listings, filter by status: "1"
 - For agents, filter by type.value: 1
 - Use .keyword suffix for exact string matches on text fields
 - Prices are in IDR (Indonesian Rupiah) for Rumah123, SGD for iProperty
-- Portal ID 1 = Rumah123, Portal ID 2 = iProperty
 - When showing prices, format them readably (e.g., "1.5B IDR" instead of "1500000000")
 - Keep your answers concise and data-driven
-- If a query returns no results, explain what was searched and suggest alternatives
-- When you get large result sets, summarize the key findings rather than listing everything
-
-Below is the complete Elasticsearch schema documentation:
+- ALWAYS use markdown pipe table syntax for tabular data (e.g., | Col1 | Col2 |\n|---|---|\n| val1 | val2 |). Never use plain text or tab-separated tables.
 
 ---
 
-${getESContext()}`;
+${getSlimContext()}`;
+}
 
 export async function POST(req: Request) {
   const authenticated = await verifyAuth();
@@ -119,9 +124,27 @@ export async function POST(req: Request) {
 
   const result = streamText({
     model: languageModel,
-    system: SYSTEM_PROMPT,
+    system: buildSystemPrompt(),
     messages: modelMessages,
     tools: {
+      get_schema: {
+        description:
+          "Load detailed schema documentation for specific Elasticsearch indices. Call this BEFORE execute_es_query to learn exact field names, types, .keyword suffixes, and enum values. Request only the indices you need (typically 1-3).",
+        inputSchema: z.object({
+          indices: z
+            .array(z.string())
+            .describe(
+              "Array of index identifiers to load schemas for, e.g. ['enquiries', 'users']. Valid values: " +
+                getSchemaFileList().join(", ")
+            ),
+        }),
+        execute: async ({ indices }: { indices: string[] }) => {
+          console.log(`[Tool Call] get_schema indices=${JSON.stringify(indices)}`);
+          const content = getSchemaFiles(indices);
+          console.log(`[Tool Result] get_schema loaded ${indices.length} schema(s), ${content.length} chars`);
+          return { schemas: content };
+        },
+      },
       execute_es_query: {
         description:
           "Execute an Elasticsearch query against the Rumah123/iProperty cluster. Use this to search, aggregate, and analyze data.",
@@ -181,7 +204,7 @@ export async function POST(req: Request) {
         },
       },
     },
-    stopWhen: stepCountIs(5),
+    stopWhen: stepCountIs(6),
   });
 
   const usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, steps: 0 };
