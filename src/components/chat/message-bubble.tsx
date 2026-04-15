@@ -88,11 +88,15 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
     );
   }
 
-  // Show "Thinking..." when streaming and last part is not active text
+  // Show "Thinking..." when streaming and model is not actively producing text or running a tool
   const lastPart = parts[parts.length - 1];
   const lastPartIsText = lastPart?.type === "text" && !!(lastPart as { type: "text"; text: string }).text;
   const lastPartIsTool = lastPart && (lastPart.type.startsWith("tool-") || lastPart.type === "dynamic-tool");
-  const showThinking = isStreaming && !lastPartIsText && !lastPartIsTool;
+  const lastToolIsActive = lastPartIsTool && (() => {
+    const { state, output } = getToolInfo(lastPart);
+    return state !== "result" && !output;
+  })();
+  const showThinking = isStreaming && !lastPartIsText && !lastToolIsActive;
 
   return (
     <div className="flex justify-start">
