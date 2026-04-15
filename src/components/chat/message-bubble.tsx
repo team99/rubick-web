@@ -147,15 +147,14 @@ export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
     );
   }
 
-  // Show "Thinking..." when streaming and model is not actively producing text or running a tool
+  // Show spinner when streaming and model is not actively running a tool (which has its own spinner)
   const lastPart = parts[parts.length - 1];
-  const lastPartIsText = lastPart?.type === "text" && !!(lastPart as { type: "text"; text: string }).text;
   const lastPartIsTool = lastPart && (lastPart.type.startsWith("tool-") || lastPart.type === "dynamic-tool");
   const lastToolIsActive = lastPartIsTool && (() => {
     const { state, output } = getToolInfo(lastPart);
     return state !== "result" && !output;
   })();
-  const showThinking = isStreaming && !lastPartIsText && !lastToolIsActive;
+  const showThinking = isStreaming && !lastToolIsActive;
 
   return (
     <div className="flex justify-start">

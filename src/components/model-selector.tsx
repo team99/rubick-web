@@ -12,12 +12,14 @@ const PROVIDER_LABELS: Record<string, string> = {
   anthropic: "Claude",
   openai: "OpenAI",
   google: "Google",
+  qwen: "Qwen",
 };
 
 const PROVIDER_COLORS: Record<string, string> = {
   anthropic: "bg-[#D97706]/10 text-[#D97706]",
   openai: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
   google: "bg-blue-500/10 text-blue-600 dark:text-blue-400",
+  qwen: "bg-purple-500/10 text-purple-600 dark:text-purple-400",
 };
 
 interface ModelSelectorProps {

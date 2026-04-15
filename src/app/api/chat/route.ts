@@ -23,6 +23,7 @@ const PROVIDER_KEY_MAP = {
   anthropic: "ANTHROPIC_API_KEY",
   openai: "OPENAI_API_KEY",
   google: "GOOGLE_GENERATIVE_AI_API_KEY",
+  qwen: "DASHSCOPE_API_KEY",
 } as const;
 
 function getLanguageModel(modelId: string) {
@@ -48,6 +49,13 @@ function getLanguageModel(modelId: string) {
     case "google": {
       const google = createGoogleGenerativeAI({ apiKey });
       return google(config.modelId);
+    }
+    case "qwen": {
+      const qwen = createOpenAI({
+        apiKey,
+        baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+      });
+      return qwen(config.modelId);
     }
     default: {
       const _exhaustive: never = config.provider;
@@ -204,7 +212,7 @@ export async function POST(req: Request) {
         },
       },
     },
-    stopWhen: stepCountIs(6),
+    stopWhen: stepCountIs(20),
   });
 
   const usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, steps: 0 };

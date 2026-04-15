@@ -5,6 +5,7 @@ const PROVIDER_KEY_MAP: Record<string, string> = {
   anthropic: "ANTHROPIC_API_KEY",
   openai: "OPENAI_API_KEY",
   google: "GOOGLE_GENERATIVE_AI_API_KEY",
+  qwen: "DASHSCOPE_API_KEY",
 };
 
 export async function GET() {
