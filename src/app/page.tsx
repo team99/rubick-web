@@ -13,6 +13,7 @@ import { DEFAULT_MODEL } from "@/lib/models";
 
 export default function ChatPage() {
   const [model, setModel] = useState(DEFAULT_MODEL);
+  const [modelsReady, setModelsReady] = useState(false);
   const [input, setInput] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const isUserScrolledUp = useRef(false);
@@ -24,16 +25,20 @@ export default function ChatPage() {
     if (stored) setModel(stored);
   }, []);
 
+  const modelRef = useRef(model);
+  modelRef.current = model;
+
   const transport = useMemo(
     () =>
       new DefaultChatTransport({
         api: "/api/chat",
-        body: { model },
+        body: () => ({ model: modelRef.current }),
       }),
-    [model]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
   );
 
-  const { messages, sendMessage, stop, setMessages, status } = useChat({
+  const { messages, sendMessage, stop, setMessages, status, error } = useChat({
     transport,
   });
 
@@ -74,11 +79,13 @@ export default function ChatPage() {
 
   // M1: Example chips auto-submit
   async function handleExampleSelect(question: string) {
+    if (!modelsReady) return;
     setInput("");
     await sendMessage({ text: question });
   }
 
   async function onSubmit() {
+    if (!modelsReady) return;
     const text = input.trim();
     if (!text) return;
     setInput("");
@@ -106,7 +113,7 @@ export default function ChatPage() {
           )}
         </div>
         <div className="flex items-center gap-2">
-          <ModelSelector value={model} onChange={handleModelChange} />
+          <ModelSelector value={model} onChange={handleModelChange} onModelsLoaded={() => setModelsReady(true)} />
           <ThemeToggle />
           <button
             onClick={handleLogout}
@@ -127,8 +134,12 @@ export default function ChatPage() {
           className="flex-1 overflow-y-auto"
         >
           <div className="max-w-3xl mx-auto px-4 py-6 space-y-6">
-            {messages.map((msg) => (
-              <MessageBubble key={msg.id} message={msg} />
+            {messages.map((msg, idx) => (
+              <MessageBubble
+                key={msg.id}
+                message={msg}
+                isStreaming={isLoading && idx === messages.length - 1}
+              />
             ))}
             {isLoading &&
               messages.length > 0 &&
@@ -140,6 +151,28 @@ export default function ChatPage() {
                   </div>
                 </div>
               )}
+            {error && (
+              <div className="flex justify-start">
+                <div className="flex items-center gap-2 px-4 py-2 rounded-lg bg-red-50 dark:bg-red-950/30 text-sm text-red-600 dark:text-red-400">
+                  <span>{error.message || "Something went wrong"}</span>
+                  <button
+                    onClick={() => {
+                      const last = messages.filter((m) => m.role === "user").pop();
+                      if (last) {
+                        const text = last.parts
+                          .filter((p): p is { type: "text"; text: string } => p.type === "text")
+                          .map((p) => p.text)
+                          .join("");
+                        if (text) sendMessage({ text });
+                      }
+                    }}
+                    className="ml-2 underline hover:no-underline"
+                  >
+                    Retry
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

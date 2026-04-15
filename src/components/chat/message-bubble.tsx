@@ -2,68 +2,51 @@
 
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { useState } from "react";
 import type { UIMessage } from "ai";
 
-function ESQueryBlock({
-  input,
-  output,
-  isComplete,
-}: {
-  input: Record<string, unknown>;
-  output?: Record<string, unknown>;
-  isComplete: boolean;
-}) {
-  const [open, setOpen] = useState(false);
+function ToolStatus({ input, isComplete }: { input: Record<string, unknown>; isComplete: boolean }) {
   const index = String(input?.index || "unknown");
-  const query = input?.query as Record<string, unknown> | undefined;
-
-  if (!isComplete) {
-    return (
-      <div className="my-2 flex items-center gap-2 text-sm text-[#6B6B6B]">
-        <div className="animate-spin h-3 w-3 border border-[#D97706] border-t-transparent rounded-full" />
-        Querying {index}...
-      </div>
-    );
-  }
 
   return (
-    <div className="my-2 rounded-lg border border-[#E5E3DC] dark:border-[#333333] overflow-hidden text-xs">
-      <button
-        onClick={() => setOpen(!open)}
-        className="w-full flex items-center gap-2 px-3 py-2 bg-[#F5F5F0] dark:bg-[#262626] hover:bg-[#EDEBE5] dark:hover:bg-[#2A2A2A] transition-colors text-left"
-      >
-        <svg
-          width="12"
-          height="12"
-          viewBox="0 0 12 12"
-          className={`transition-transform ${open ? "rotate-90" : ""} text-[#6B6B6B]`}
-          fill="currentColor"
-        >
-          <path d="M4 2l4 4-4 4" />
+    <div className="my-1.5 flex items-center gap-2 text-xs text-[#6B6B6B]">
+      {isComplete ? (
+        <svg width="12" height="12" viewBox="0 0 12 12" className="text-[#D97706] shrink-0" fill="none" stroke="currentColor" strokeWidth="1.5">
+          <path d="M2.5 6.5L5 9L9.5 3.5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
-        <span className="font-medium text-[#D97706]">ES Query</span>
-        <span className="text-[#6B6B6B] dark:text-[#999999]">{index}</span>
-      </button>
-      {open && (
-        <div className="px-3 py-2 space-y-2 bg-[#F5F2EB] dark:bg-[#1E1E1E]">
-          {query && (
-            <div>
-              <span className="text-[#6B6B6B] font-medium">Query:</span>
-              <pre className="mt-1 overflow-x-auto text-[#1A1A1A] dark:text-[#E8E8E8]">
-                {JSON.stringify(query, null, 2)}
-              </pre>
-            </div>
-          )}
-          {output && (
-            <div>
-              <span className="text-[#6B6B6B] font-medium">Result:</span>
-              <pre className="mt-1 overflow-x-auto max-h-60 text-[#1A1A1A] dark:text-[#E8E8E8]">
-                {JSON.stringify(output, null, 2)}
-              </pre>
-            </div>
-          )}
-        </div>
+      ) : (
+        <div className="animate-spin h-3 w-3 border border-[#D97706] border-t-transparent rounded-full shrink-0" />
+      )}
+      <span>{isComplete ? `Queried ${index}` : `Querying ${index}...`}</span>
+    </div>
+  );
+}
+
+interface UsageInfo {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  steps: number;
+}
+
+function UsageBadge({ usage, model }: { usage: UsageInfo; model?: string }) {
+  return (
+    <div className="mt-2 flex items-center gap-2 text-[11px] text-[#999999] dark:text-[#666666]">
+      <span>{usage.totalTokens.toLocaleString()} tokens</span>
+      <span className="text-[#CCCCCC] dark:text-[#444444]">|</span>
+      <span>{usage.inputTokens.toLocaleString()} in</span>
+      <span className="text-[#CCCCCC] dark:text-[#444444]">|</span>
+      <span>{usage.outputTokens.toLocaleString()} out</span>
+      {usage.steps > 1 && (
+        <>
+          <span className="text-[#CCCCCC] dark:text-[#444444]">|</span>
+          <span>{usage.steps} steps</span>
+        </>
+      )}
+      {model && (
+        <>
+          <span className="text-[#CCCCCC] dark:text-[#444444]">|</span>
+          <span>{model}</span>
+        </>
       )}
     </div>
   );
@@ -82,10 +65,13 @@ function getToolInfo(part: unknown) {
 
 interface MessageBubbleProps {
   message: UIMessage;
+  isStreaming?: boolean;
 }
 
-export function MessageBubble({ message }: MessageBubbleProps) {
+export function MessageBubble({ message, isStreaming }: MessageBubbleProps) {
   const { role, parts } = message;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const meta = (message as any).metadata as { usage?: UsageInfo; model?: string } | undefined;
 
   if (role === "user") {
     const text = parts
@@ -101,6 +87,12 @@ export function MessageBubble({ message }: MessageBubbleProps) {
       </div>
     );
   }
+
+  // Show "Thinking..." when streaming and last part is not active text
+  const lastPart = parts[parts.length - 1];
+  const lastPartIsText = lastPart?.type === "text" && !!(lastPart as { type: "text"; text: string }).text;
+  const lastPartIsTool = lastPart && (lastPart.type.startsWith("tool-") || lastPart.type === "dynamic-tool");
+  const showThinking = isStreaming && !lastPartIsText && !lastPartIsTool;
 
   return (
     <div className="flex justify-start">
@@ -124,23 +116,24 @@ export function MessageBubble({ message }: MessageBubbleProps) {
             );
           }
 
-          // Handle tool call parts (v6: type is "tool-{name}" or "dynamic-tool")
+          // Tool calls: show as brief status line
           if (part.type.startsWith("tool-") || part.type === "dynamic-tool") {
             const { input, output, state } = getToolInfo(part);
-            const isComplete = state === "result";
-
-            return (
-              <ESQueryBlock
-                key={i}
-                input={input}
-                output={output}
-                isComplete={isComplete}
-              />
-            );
+            const isComplete = state === "result" || !!output || !isStreaming || i < parts.length - 1;
+            return <ToolStatus key={i} input={input} isComplete={isComplete} />;
           }
 
           return null;
         })}
+        {showThinking && (
+          <div className="my-1.5 flex items-center gap-2 text-xs text-[#6B6B6B]">
+            <div className="animate-spin h-3 w-3 border border-[#D97706] border-t-transparent rounded-full" />
+            Thinking...
+          </div>
+        )}
+        {!isStreaming && meta?.usage && (
+          <UsageBadge usage={meta.usage} model={meta.model} />
+        )}
       </div>
     </div>
   );

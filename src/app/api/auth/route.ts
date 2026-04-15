@@ -36,7 +36,7 @@ export async function POST(req: NextRequest) {
   }
 
   const response = NextResponse.json({ success: true });
-  const cookie = getAuthCookieConfig();
+  const cookie = await getAuthCookieConfig();
   response.cookies.set(cookie.name, cookie.value, {
     httpOnly: cookie.httpOnly,
     secure: cookie.secure,

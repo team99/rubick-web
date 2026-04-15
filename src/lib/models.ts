@@ -34,13 +34,13 @@ export const MODELS: ModelConfig[] = [
     id: "gemini-pro",
     name: "Gemini 2.5 Pro",
     provider: "google",
-    modelId: "gemini-2.5-pro-preview-05-06",
+    modelId: "gemini-2.5-pro",
   },
   {
     id: "gemini-flash",
     name: "Gemini 2.5 Flash",
     provider: "google",
-    modelId: "gemini-2.5-flash-preview-04-17",
+    modelId: "gemini-2.5-flash",
   },
 ];
 

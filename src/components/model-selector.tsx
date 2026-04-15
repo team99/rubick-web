@@ -23,9 +23,10 @@ const PROVIDER_COLORS: Record<string, string> = {
 interface ModelSelectorProps {
   value: string;
   onChange: (value: string) => void;
+  onModelsLoaded?: () => void;
 }
 
-export function ModelSelector({ value, onChange }: ModelSelectorProps) {
+export function ModelSelector({ value, onChange, onModelsLoaded }: ModelSelectorProps) {
   const [models, setModels] = useState<AvailableModel[]>([]);
 
   useEffect(() => {
@@ -37,9 +38,10 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
         if (data.length > 0 && !data.some((m) => m.id === value)) {
           onChange(data[0].id);
         }
+        onModelsLoaded?.();
       })
       .catch(() => {
-        // Fallback — show nothing, user can still type
+        onModelsLoaded?.();
       });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 

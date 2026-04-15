@@ -1,4 +1,4 @@
-import { streamText, stepCountIs, type ModelMessage } from "ai";
+import { streamText, stepCountIs, convertToModelMessages, type UIMessage } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
@@ -113,10 +113,14 @@ export async function POST(req: Request) {
     });
   }
 
+  const modelMessages = await convertToModelMessages(
+    messages as UIMessage[]
+  );
+
   const result = streamText({
     model: languageModel,
     system: SYSTEM_PROMPT,
-    messages: messages as ModelMessage[],
+    messages: modelMessages,
     tools: {
       execute_es_query: {
         description:
@@ -140,6 +144,7 @@ export async function POST(req: Request) {
           index: string;
           query: Record<string, unknown>;
         }) => {
+          console.log(`[Tool Call] execute_es_query index="${index}"`, JSON.stringify(query, null, 2));
           try {
             const esResult = await executeESQuery(index, query);
 
@@ -150,7 +155,7 @@ export async function POST(req: Request) {
               (hits.hits as Array<Record<string, unknown>>) || [];
             const aggregations = esResult.aggregations;
 
-            return {
+            const result = {
               total,
               hits_count: hitsArray.length,
               hits: hitsArray.slice(0, 20).map((h) => ({
@@ -159,16 +164,19 @@ export async function POST(req: Request) {
               })),
               aggregations: aggregations || null,
             };
+            console.log(`[Tool Result] total=${JSON.stringify(total)} hits_count=${hitsArray.length} has_aggs=${!!aggregations}`);
+            return result;
           } catch (error: unknown) {
-            // Return generic error — don't leak ES internals
-            console.error("[ES Query Error]", error);
-            const isPermission =
-              error instanceof Error && error.message.includes("not permitted");
-            return {
+            const esError = error instanceof Error ? error.message : String(error);
+            console.error(`[Tool Error] ${esError}`);
+            const isPermission = esError.includes("not permitted");
+            const toolError = {
               error: isPermission
                 ? "That index is not available for querying."
                 : "Failed to execute Elasticsearch query. Please try a different query.",
             };
+            console.log(`[Tool Error Response]`, JSON.stringify(toolError));
+            return toolError;
           }
         },
       },
@@ -176,5 +184,24 @@ export async function POST(req: Request) {
     stopWhen: stepCountIs(5),
   });
 
-  return result.toUIMessageStreamResponse();
+  const usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0, steps: 0 };
+
+  return result.toUIMessageStreamResponse({
+    messageMetadata: ({ part }) => {
+      if (part.type === "finish-step") {
+        const input = part.usage.inputTokens ?? 0;
+        const output = part.usage.outputTokens ?? 0;
+        usage.inputTokens += input;
+        usage.outputTokens += output;
+        usage.totalTokens += input + output;
+        usage.steps += 1;
+        console.log(`[Step ${usage.steps}] in=${input} out=${output} (cumulative: ${usage.totalTokens})`);
+        return { usage: { ...usage }, model: modelId };
+      }
+      if (part.type === "start") {
+        return { usage: null, model: modelId };
+      }
+      return undefined;
+    },
+  });
 }

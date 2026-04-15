@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyAuthToken } from "@/lib/auth";
 
-export function middleware(req: NextRequest) {
+export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
   // Allow login page and auth endpoint only
@@ -12,7 +12,7 @@ export function middleware(req: NextRequest) {
   // Check auth cookie
   const token = req.cookies.get("rubick-auth")?.value;
 
-  if (!verifyAuthToken(token)) {
+  if (!(await verifyAuthToken(token))) {
     // API routes return 401, page routes redirect to login
     if (pathname.startsWith("/api/")) {
       return new NextResponse("Unauthorized", { status: 401 });

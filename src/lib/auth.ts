@@ -1,5 +1,4 @@
 import { cookies } from "next/headers";
-import crypto from "crypto";
 
 const AUTH_COOKIE = "rubick-auth";
 const COOKIE_MAX_AGE = 60 * 60 * 24; // 24 hours
@@ -14,12 +13,27 @@ function getPassword(): string {
   return password;
 }
 
-export function getAuthToken(): string {
-  const password = getPassword();
-  return crypto
-    .createHmac("sha256", "rubick-session-key")
-    .update(password)
-    .digest("hex");
+async function computeAuthToken(password: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode("rubick-session-key"),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    encoder.encode(password)
+  );
+  return Array.from(new Uint8Array(signature))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+export async function getAuthToken(): Promise<string> {
+  return computeAuthToken(getPassword());
 }
 
 export function validatePassword(input: string): boolean {
@@ -29,18 +43,20 @@ export function validatePassword(input: string): boolean {
 export async function verifyAuth(): Promise<boolean> {
   const cookieStore = await cookies();
   const token = cookieStore.get(AUTH_COOKIE)?.value;
-  return token === getAuthToken();
+  return token === (await getAuthToken());
 }
 
-export function verifyAuthToken(token: string | undefined): boolean {
+export async function verifyAuthToken(
+  token: string | undefined
+): Promise<boolean> {
   if (!token) return false;
-  return token === getAuthToken();
+  return token === (await getAuthToken());
 }
 
-export function getAuthCookieConfig() {
+export async function getAuthCookieConfig() {
   return {
     name: AUTH_COOKIE,
-    value: getAuthToken(),
+    value: await getAuthToken(),
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax" as const,
