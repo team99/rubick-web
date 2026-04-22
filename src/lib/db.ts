@@ -19,3 +19,9 @@ export const sql = global.__rubickSql ?? makeClient();
 if (process.env.NODE_ENV !== "production") {
   global.__rubickSql = sql;
 }
+
+// Shared type for functions that want to accept either the module-level `sql`
+// or a `tx` handle from `sql.begin(async (tx) => ...)`. `Sql` and
+// `TransactionSql` both extend `ISql`, which exposes the tagged-template
+// interface (and `.json`) that our helpers actually use.
+export type Db = postgres.ISql;

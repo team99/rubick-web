@@ -1517,7 +1517,7 @@ Overwrite `src/app/api/chat/route.ts`:
 
 ```ts
 // src/app/api/chat/route.ts
-import { streamText, stepCountIs, convertToModelMessages, type UIMessage, type ModelMessage } from "ai";
+import { streamText, stepCountIs, convertToModelMessages, type UIMessage, type ModelMessage, type JSONValue } from "ai";
 import { after } from "next/server";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
@@ -1660,7 +1660,7 @@ function dbToModelMessages(rows: DbMessage[]): ModelMessage[] {
             toolCallId: r.tool_call_id!,
             toolName: r.tool_name!,
             // B3: safeParse instead of raw JSON.parse — malformed tool JSON must not 500 the stream.
-            output: { type: "json", value: safeParse(r.content) },
+            output: { type: "json", value: safeParse(r.content) as JSONValue },
           },
         ],
       });
@@ -1672,6 +1672,7 @@ function dbToModelMessages(rows: DbMessage[]): ModelMessage[] {
 export async function POST(req: Request) {
   const session = await auth();
   if (!session?.user?.id) return new Response("Unauthorized", { status: 401 });
+  const userId = session.user.id;
 
   const body = await req.json();
   const parsed = requestSchema.safeParse(body);
@@ -1698,7 +1699,7 @@ export async function POST(req: Request) {
     // streams/compactions on the same conv. Auto-released on commit/rollback.
     await tx`SELECT pg_advisory_xact_lock(hashtext(${conversationId}))`;
 
-    const conv = await getConversation(conversationId, session.user!.id);
+    const conv = await getConversation(conversationId, userId, tx);
     if (!conv) return { conv: null, effective: [], compaction: null, tail: [] } as const;
 
     // Persist the incoming user message first
@@ -1706,14 +1707,14 @@ export async function POST(req: Request) {
       conversation_id: conversationId,
       role: "user",
       content: message,
-    });
+    }, tx);
 
     // Compact if over threshold (same tx — so the compaction row is visible to
     // the reload below and the advisory lock still covers it).
-    await maybeCompact(conversationId, conv.model);
+    await maybeCompact(conversationId, conv.model, tx);
 
     // Reload effective window
-    const all = await loadMessages(conversationId);
+    const all = await loadMessages(conversationId, tx);
     const effective = sliceFromLatestCompaction(all);
     const compaction = effective[0]?.role === "compaction" ? effective[0] : null;
     const tail = compaction ? effective.slice(1) : effective;

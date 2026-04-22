@@ -1,5 +1,5 @@
 // src/lib/conversation.ts
-import { sql } from "@/lib/db";
+import { sql, type Db } from "@/lib/db";
 import { nanoid } from "nanoid";
 
 export type DbMessage = {
@@ -23,9 +23,13 @@ export type DbConversation = {
   updated_at: Date;
 };
 
-export async function createConversation(userId: string, model: string): Promise<DbConversation> {
+export async function createConversation(
+  userId: string,
+  model: string,
+  db: Db = sql
+): Promise<DbConversation> {
   const id = `c_${nanoid(16)}`;
-  const [row] = await sql<DbConversation[]>`
+  const [row] = await db<DbConversation[]>`
     INSERT INTO conversations (id, user_id, model)
     VALUES (${id}, ${userId}, ${model})
     RETURNING *
@@ -33,8 +37,11 @@ export async function createConversation(userId: string, model: string): Promise
   return row;
 }
 
-export async function listConversations(userId: string): Promise<DbConversation[]> {
-  return sql<DbConversation[]>`
+export async function listConversations(
+  userId: string,
+  db: Db = sql
+): Promise<DbConversation[]> {
+  return db<DbConversation[]>`
     SELECT * FROM conversations
     WHERE user_id = ${userId}
     ORDER BY updated_at DESC
@@ -44,16 +51,20 @@ export async function listConversations(userId: string): Promise<DbConversation[
 
 export async function getConversation(
   id: string,
-  userId: string
+  userId: string,
+  db: Db = sql
 ): Promise<DbConversation | null> {
-  const [row] = await sql<DbConversation[]>`
+  const [row] = await db<DbConversation[]>`
     SELECT * FROM conversations WHERE id = ${id} AND user_id = ${userId} LIMIT 1
   `;
   return row ?? null;
 }
 
-export async function loadMessages(conversationId: string): Promise<DbMessage[]> {
-  return sql<DbMessage[]>`
+export async function loadMessages(
+  conversationId: string,
+  db: Db = sql
+): Promise<DbMessage[]> {
+  return db<DbMessage[]>`
     SELECT * FROM messages WHERE conversation_id = ${conversationId} ORDER BY id ASC
   `;
 }
@@ -70,36 +81,43 @@ export function sliceFromLatestCompaction(rows: DbMessage[]): DbMessage[] {
   return cutIdx === -1 ? rows : rows.slice(cutIdx);
 }
 
-export async function appendMessage(m: {
-  conversation_id: string;
-  role: DbMessage["role"];
-  content?: string | null;
-  tool_calls?: unknown;
-  tool_call_id?: string | null;
-  tool_name?: string | null;
-  metadata?: Record<string, unknown> | null;
-}): Promise<DbMessage | null> {
+export async function appendMessage(
+  m: {
+    conversation_id: string;
+    role: DbMessage["role"];
+    content?: string | null;
+    tool_calls?: unknown;
+    tool_call_id?: string | null;
+    tool_name?: string | null;
+    metadata?: Record<string, unknown> | null;
+  },
+  db: Db = sql
+): Promise<DbMessage | null> {
   // ON CONFLICT handles SDK retries re-inserting the same tool result row.
   // idx_msg_tool_result is a UNIQUE partial index on (conversation_id, tool_call_id)
   // WHERE tool_call_id IS NOT NULL.
-  const rows = await sql<DbMessage[]>`
+  const rows = await db<DbMessage[]>`
     INSERT INTO messages (conversation_id, role, content, tool_calls, tool_call_id, tool_name, metadata)
     VALUES (${m.conversation_id}, ${m.role}, ${m.content ?? null},
-            ${m.tool_calls ? sql.json(m.tool_calls as never) : null},
+            ${m.tool_calls ? db.json(m.tool_calls as never) : null},
             ${m.tool_call_id ?? null}, ${m.tool_name ?? null},
-            ${m.metadata ? sql.json(m.metadata as never) : null})
+            ${m.metadata ? db.json(m.metadata as never) : null})
     ON CONFLICT (conversation_id, tool_call_id)
       WHERE tool_call_id IS NOT NULL
       DO NOTHING
     RETURNING *
   `;
   if (rows.length === 0) return null; // duplicate tool result suppressed
-  await sql`UPDATE conversations SET updated_at = now() WHERE id = ${m.conversation_id}`;
+  await db`UPDATE conversations SET updated_at = now() WHERE id = ${m.conversation_id}`;
   return rows[0];
 }
 
-export async function setTitle(conversationId: string, title: string): Promise<void> {
-  await sql`
+export async function setTitle(
+  conversationId: string,
+  title: string,
+  db: Db = sql
+): Promise<void> {
+  await db`
     UPDATE conversations SET title = ${title}
     WHERE id = ${conversationId} AND title = 'New chat'
   `;

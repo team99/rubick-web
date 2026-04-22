@@ -11,6 +11,7 @@ import {
 } from "@/lib/conversation";
 import { estimateTokens, estimateMessagesTokens } from "@/lib/tokens";
 import { getModelConfig, type ModelConfig } from "@/lib/models";
+import { sql, type Db } from "@/lib/db";
 
 export const COMPACTION_THRESHOLD: Record<ModelConfig["provider"], number> = {
   anthropic: 150_000,
@@ -189,9 +190,10 @@ export type MaybeCompactResult =
  */
 export async function maybeCompact(
   conversationId: string,
-  chatModelId: string
+  chatModelId: string,
+  db: Db = sql
 ): Promise<MaybeCompactResult> {
-  const all = await loadMessages(conversationId);
+  const all = await loadMessages(conversationId, db);
   const effective = sliceFromLatestCompaction(all);
 
   const tokens = estimateMessagesTokens(effective);
@@ -254,12 +256,15 @@ export async function maybeCompact(
     ms,
   };
 
-  await appendMessage({
-    conversation_id: conversationId,
-    role: "compaction",
-    content: text,
-    metadata,
-  });
+  await appendMessage(
+    {
+      conversation_id: conversationId,
+      role: "compaction",
+      content: text,
+      metadata,
+    },
+    db
+  );
 
   return { compacted: true, summary: text, metadata };
 }
