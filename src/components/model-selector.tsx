@@ -26,9 +26,10 @@ interface ModelSelectorProps {
   value: string;
   onChange: (value: string) => void;
   onModelsLoaded?: () => void;
+  disabled?: boolean;
 }
 
-export function ModelSelector({ value, onChange, onModelsLoaded }: ModelSelectorProps) {
+export function ModelSelector({ value, onChange, onModelsLoaded, disabled }: ModelSelectorProps) {
   const [models, setModels] = useState<AvailableModel[]>([]);
 
   useEffect(() => {
@@ -60,7 +61,8 @@ export function ModelSelector({ value, onChange, onModelsLoaded }: ModelSelector
       <select
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        className="appearance-none pl-3 pr-8 py-1.5 rounded-lg border border-[#E5E3DC] dark:border-[#333333] bg-white dark:bg-[#262626] text-sm text-[#1A1A1A] dark:text-[#E8E8E8] cursor-pointer focus:outline-none focus:ring-2 focus:ring-[#D97706]/40"
+        disabled={disabled}
+        className="appearance-none pl-3 pr-8 py-1.5 rounded-lg border border-[#E5E3DC] dark:border-[#333333] bg-white dark:bg-[#262626] text-sm text-[#1A1A1A] dark:text-[#E8E8E8] cursor-pointer focus:outline-none focus:ring-2 focus:ring-[#D97706]/40 disabled:opacity-60 disabled:cursor-not-allowed"
       >
         {models.map((model) => (
           <option key={model.id} value={model.id}>

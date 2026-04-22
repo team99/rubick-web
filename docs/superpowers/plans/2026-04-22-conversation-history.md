@@ -1941,24 +1941,27 @@ export default function ConversationPage() {
   }, [conversationId, router]);
 
   const modelRef = useRef(model);
-  modelRef.current = model;
+  useEffect(() => {
+    modelRef.current = model;
+  }, [model]);
 
   const transport = useMemo(
     () =>
+      // `body` runs at send time (not during render), so ref access is safe.
+      // eslint-disable-next-line react-hooks/refs
       new DefaultChatTransport({
         api: "/api/chat",
         body: () => ({
           conversationId,
           model: modelRef.current,
-          // useChat passes the latest user message automatically via `messages` in body;
-          // we override to send only the new user text via a custom fetch path below.
         }),
         prepareSendMessagesRequest({ messages, body }) {
           const last = messages[messages.length - 1];
-          const text = last?.parts
-            ?.filter((p): p is { type: "text"; text: string } => p.type === "text")
-            .map((p) => p.text)
-            .join("") ?? "";
+          const text =
+            last?.parts
+              ?.filter((p): p is { type: "text"; text: string } => p.type === "text")
+              .map((p) => p.text)
+              .join("") ?? "";
           return { body: { ...body, message: text } };
         },
       }),
