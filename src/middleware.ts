@@ -1,28 +1,31 @@
-import { NextRequest, NextResponse } from "next/server";
-import { verifyAuthToken } from "@/lib/auth";
+// src/middleware.ts
+// Runs on the Edge runtime. Must import ONLY from auth.config (no DB, no Node deps).
+import NextAuth from "next-auth";
+import authConfig from "@/lib/auth.config";
+import { NextResponse } from "next/server";
 
-export async function middleware(req: NextRequest) {
+const { auth } = NextAuth(authConfig);
+
+export default auth((req) => {
+  const isLoggedIn = !!req.auth?.user;
   const { pathname } = req.nextUrl;
 
-  // Allow login page and auth endpoint only
-  if (pathname === "/login" || pathname === "/api/auth") {
-    return NextResponse.next();
-  }
+  const isPublic =
+    pathname === "/login" ||
+    pathname.startsWith("/api/auth") ||
+    pathname.startsWith("/_next") ||
+    pathname === "/favicon.ico";
 
-  // Check auth cookie
-  const token = req.cookies.get("rubick-auth")?.value;
-
-  if (!(await verifyAuthToken(token))) {
-    // API routes return 401, page routes redirect to login
-    if (pathname.startsWith("/api/")) {
-      return new NextResponse("Unauthorized", { status: 401 });
-    }
-    return NextResponse.redirect(new URL("/login", req.url));
+  if (!isLoggedIn && !isPublic) {
+    const url = req.nextUrl.clone();
+    url.pathname = "/login";
+    url.searchParams.set("callbackUrl", pathname);
+    return NextResponse.redirect(url);
   }
 
   return NextResponse.next();
-}
+});
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"], // If /api/health is ever added for k8s probes, add it to this exclusion list.
 };
