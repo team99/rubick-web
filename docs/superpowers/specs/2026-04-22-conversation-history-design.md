@@ -327,6 +327,7 @@ Fires once per conversation, after the first complete assistant turn, if `conver
 - **Resume.** On `/c/[id]` mount, fetch `GET /api/conversations/:id/messages`, hydrate `useChat` initial messages. Subsequent streaming proceeds normally via `POST /api/chat` with `{ conversationId, message, model }`.
 - **Compaction indicator.** Compaction rows are rendered as a subtle separator in the transcript: a horizontal rule + "Earlier context summarized" label + expandable reveal showing the markdown summary. Not an error, not alarming — just honest.
 - **Auth surface.** Unauthenticated users land on `/login` (Google sign-in button). Non-invited sign-ins get a polite "This app is invite-only. Ask erwin@99.co for access." page.
+- **Model selector scope.** On `/c/[id]`, the model selector is disabled — the conversation's model is fixed at creation time and enforced server-side.
 
 ---
 

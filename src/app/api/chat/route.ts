@@ -233,7 +233,11 @@ export async function POST(req: Request) {
   } catch (error) {
     // Release the stream slot we claimed — otherwise this conversation is
     // locked out for 2 minutes on a misconfigured model.
-    await endStream(conversationId, streamId);
+    try {
+      await endStream(conversationId, streamId);
+    } catch (err) {
+      console.error("[model-config endStream failed]", err instanceof Error ? err.message : err);
+    }
     const msg = error instanceof Error ? error.message : "Model not available";
     return new Response(JSON.stringify({ error: msg }), {
       status: 400,
@@ -294,10 +298,24 @@ export async function POST(req: Request) {
       },
     },
     stopWhen: stepCountIs(20),
-    onError: async () => {
+    onError: async ({ error }) => {
+      console.error("[chat stream error]", error instanceof Error ? error.message : error);
       // Release the stream slot on SDK/provider errors so the conversation
       // isn't locked out for 2 minutes.
-      await endStream(conversationId, streamId);
+      try {
+        await endStream(conversationId, streamId);
+      } catch (err) {
+        console.error("[onError endStream failed]", err instanceof Error ? err.message : err);
+      }
+    },
+    // C1: ai-sdk v6 fires onAbort separately from onFinish/onError. Without
+    // this, a user's Stop click leaks the stream slot for the full 2-min TTL.
+    onAbort: async () => {
+      try {
+        await endStream(conversationId, streamId);
+      } catch (err) {
+        console.error("[onAbort endStream failed]", err instanceof Error ? err.message : err);
+      }
     },
     // Runs AFTER the setup tx has committed and the advisory lock is released.
     // Concurrent writes on this conversation are prevented by active_stream_id
@@ -307,6 +325,22 @@ export async function POST(req: Request) {
     // handled by the partial unique index on (conversation_id, tool_call_id).
     // SECURITY: do NOT log tool inputs, ES responses, or user message content.
     onStepFinish: async ({ text, toolCalls, toolResults, finishReason }) => {
+      // C2: Heartbeat — refresh our claim on the stream slot and bail if we
+      // lost it. Prevents a long-running turn (>2min) from interleaving writes
+      // with a concurrent stream that reclaimed the slot via the TTL.
+      const stillOwn = await sql<Array<{ id: string }>>`
+        UPDATE conversations
+           SET active_stream_started_at = now()
+         WHERE id = ${conversationId} AND active_stream_id = ${streamId}
+         RETURNING id
+      `;
+      if (stillOwn.length === 0) {
+        console.warn("[chat] lost stream slot mid-turn, skipping step persistence", {
+          conversationId,
+          streamId,
+        });
+        return;
+      }
       // Persist assistant step (text + tool_calls) if there is anything
       if (text || (toolCalls && toolCalls.length > 0)) {
         const formattedCalls = toolCalls?.map((tc) => ({
@@ -336,8 +370,11 @@ export async function POST(req: Request) {
               tool_name: tr.toolName,
             });
           } catch (err) {
-            // Log IDs only — never the tool content, input, or ES response body.
-            console.error("[tool persist failed]", { toolCallId: tr.toolCallId });
+            // Log IDs + error message only — never the tool content, input, or ES response body.
+            console.error("[tool persist failed]", {
+              toolCallId: tr.toolCallId,
+              error: err instanceof Error ? err.message : err,
+            });
           }
         }
       }
@@ -345,7 +382,11 @@ export async function POST(req: Request) {
     onFinish: async () => {
       // Release the stream slot first so a follow-up POST isn't blocked
       // while title generation runs.
-      await endStream(conversationId, streamId);
+      try {
+        await endStream(conversationId, streamId);
+      } catch (err) {
+        console.error("[onFinish endStream failed]", err instanceof Error ? err.message : err);
+      }
 
       // Kick title generation on first complete turn.
       // B3: use after() so serverless runtimes keep the task alive after the

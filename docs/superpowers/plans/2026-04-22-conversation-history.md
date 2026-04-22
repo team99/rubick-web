@@ -1188,21 +1188,42 @@ function summarizerModel(s: Summarizer) {
   }
 }
 
+export type MaybeCompactResult =
+  | { compacted: false }
+  | {
+      compacted: true;
+      summary: string;
+      metadata: {
+        summarized_through_message_id: number;
+        pre_tokens: number;
+        post_tokens: number;
+        prompt_version: string;
+        summarizer_model: string;
+        ratio: number;
+        created_at: string;
+        ms: number;
+      };
+    };
+
 /**
  * Compact the conversation if estimated tokens exceed threshold.
  * Inserts a new `compaction` message covering everything up to a safe cut
- * point. Returns true if compaction occurred.
+ * point. Returns a discriminated result describing whether compaction ran.
+ *
+ * Accepts an optional `db` so the chat route can thread a transaction
+ * (`sql.begin` handle) through reads + the compaction append.
  */
 export async function maybeCompact(
   conversationId: string,
-  chatModelId: string
-): Promise<boolean> {
-  const all = await loadMessages(conversationId);
+  chatModelId: string,
+  db: Db = sql
+): Promise<MaybeCompactResult> {
+  const all = await loadMessages(conversationId, db);
   const effective = sliceFromLatestCompaction(all);
 
   const tokens = estimateMessagesTokens(effective);
   const threshold = thresholdFor(chatModelId);
-  if (tokens < threshold) return false;
+  if (tokens < threshold) return { compacted: false };
 
   // Keep ~25% of the window as "recent context", summarize the rest.
   const keepBudget = Math.floor(threshold * 0.25);
@@ -1230,14 +1251,22 @@ export async function maybeCompact(
   }
 
   const { toSummarize } = splitForCompaction(effective, keepFromIdx);
-  if (toSummarize.length === 0) return false;
+  if (toSummarize.length === 0) return { compacted: false };
 
-  const s = pickSummarizer();
+  const picked = pickSummarizer();
+  if (!picked) {
+    console.error("[compaction] no summarizer API key configured; skipping");
+    return { compacted: false };
+  }
   const prompt = formatMessagesForSummary(toSummarize);
 
+  // Summarizer runs OUTSIDE the setup transaction — intentional v1 trade-off.
+  // Holding a pooled pg connection for the duration of an LLM call would
+  // exhaust the pool under concurrent load. The active_stream_id gate in the
+  // chat route rejects concurrent POSTs with 409 before this returns.
   const t0 = Date.now();
   const { text } = await generateText({
-    model: summarizerModel(s),
+    model: picked.model,
     system: SUMMARIZER_SYSTEM,
     prompt,
   });
@@ -1259,26 +1288,36 @@ export async function maybeCompact(
   const missing = REQUIRED_HEADING_PATTERNS.filter(r => !r.test(text)).map(r => r.source);
   if (missing.length > 0) {
     console.error("[compaction] summarizer output missing headings; skipping write", { missing });
-    return false;
+    return { compacted: false };
   }
 
   const preTokens = estimateMessagesTokens(toSummarize);
   const postTokens = estimateTokens(text);
+  const ratio = preTokens > 0 ? postTokens / preTokens : 0;
+  const createdAt = new Date().toISOString();
 
-  await appendMessage({
-    conversation_id: conversationId,
-    role: "compaction",
-    content: text,
-    metadata: {
-      summarized_through_message_id: toSummarize[toSummarize.length - 1].id,
-      pre_tokens: preTokens,
-      post_tokens: postTokens,
-      summarizer_model: `${s.provider}:${s.modelId}`,
-      prompt_version: COMPACTION_PROMPT_VERSION,
-      ms,
+  const metadata = {
+    summarized_through_message_id: toSummarize[toSummarize.length - 1].id,
+    pre_tokens: preTokens,
+    post_tokens: postTokens,
+    prompt_version: COMPACTION_PROMPT_VERSION,
+    summarizer_model: picked.id,
+    ratio,
+    created_at: createdAt,
+    ms,
+  };
+
+  await appendMessage(
+    {
+      conversation_id: conversationId,
+      role: "compaction",
+      content: text,
+      metadata,
     },
-  });
-  return true;
+    db
+  );
+
+  return { compacted: true, summary: text, metadata };
 }
 ```
 
