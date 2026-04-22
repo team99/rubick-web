@@ -174,7 +174,14 @@ One-paragraph description of what the user is currently trying to learn.
 
 **Why markdown and not JSON.** Maya's L4 uses JSON because maya extracts typed fields programmatically (L5 dossier reads `stablePreferences`). Rubick has exactly one consumer of the summary: the next LLM prompt. There is no typed schema in the ES-analyst domain worth encoding (each conversation has a different index focus), no downstream extractor, no analytics that reads summary fields. Single-consumer prose is the right shape. Decision rule recorded for future features: *if something other than the next LLM prompt starts reading the summary, revisit.*
 
-**Why self-contained and not chained.** Each compaction is generated from `(previous_compaction_content || messages_after_it)` but is written as a *replacement*, not a delta. Loading never chains multiple compactions; it always starts from the latest one.
+**Chained, with bounded drift.** Each compaction is generated from `(previous_compaction_content || messages_after_it)` — the prior summary *is* fed into the next summarizer as `[PRIOR SUMMARY]`. That is technically chaining, and paraphrase drift compounds across cycles. The mitigating factors we accept:
+
+1. The fixed-heading skeleton (`## Conversation summary` / `### Current task` / …) constrains drift to bullet content within stable sections.
+2. The summarizer prompt demands verbatim preservation of ES index names, field paths, and numbers.
+3. Rubick conversations rarely exceed ~5 compactions in practice (ES analysts move on to new questions quickly).
+4. *Loading* never replays multiple compactions — the most recent compaction is the only one injected into the next chat request. So drift lives only on the write path, not on the read path.
+
+The honest statement: compactions are chained writes but single-compaction reads. If drift becomes observable, switch the summarizer to re-consume raw history instead of the prior summary.
 
 ---
 
