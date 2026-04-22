@@ -667,7 +667,6 @@ git commit -m "feat(auth): route gate via NextAuth middleware"
 // This is a conservative approximation — actual token counts on non-Anthropic providers
 // will differ. Monitor logs for "context exceeded" errors from provider SDKs; if they
 // appear, swap in provider-specific tokenizers (js-tiktoken for OpenAI, etc.).
-// @ts-expect-error – no bundled types
 import { countTokens } from "@anthropic-ai/tokenizer";
 
 export function estimateTokens(text: string): number {
