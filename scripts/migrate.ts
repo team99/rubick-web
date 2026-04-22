@@ -1,8 +1,12 @@
 // scripts/migrate.ts
-import "dotenv/config";
+import { config as dotenvConfig } from "dotenv";
 import postgres from "postgres";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+
+// Next.js convention: .env.local overrides .env. Load both.
+dotenvConfig({ path: ".env.local" });
+dotenvConfig();
 
 async function main() {
   const url = process.env.DATABASE_URL;

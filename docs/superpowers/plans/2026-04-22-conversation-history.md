@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Round 2 audit applied** (2026-04-22): concurrency lock, DB role re-check, safeParse in tool-message hydration, disabled selector on /c/[id], tool-output try/catch, title retry, summary-heading validation, token-estimator note, multi-provider E2E, migration unsafe comment, next-auth pin, middleware-matcher note. See `/Users/erwin/.claude/plans/enchanted-shimmying-otter.md` for the audit summary.
+
 **Goal:** Add multi-user conversation history with per-conversation context windows, Google OAuth (invite-only), Postgres persistence, and provider-agnostic compaction via a single summarization LLM call.
 
 **Architecture:** Next.js 16 App Router. Postgres is source of truth (3 tables: `users`, `conversations`, `messages`). Compaction is an in-band `messages` row with `role='compaction'` and sectioned-markdown content. Chat route persists each streamed step so disconnects are durable. Summarizer pinned to `claude-haiku-4-5` with fallback. Route changes: chat UI moves from `/` to `/c/[id]`; `/` becomes a "new chat" launcher.
@@ -91,8 +93,10 @@ ADMIN_EMAIL=erwin@99.co
 - [ ] **Step 1: Install runtime deps**
 
 ```bash
-npm install postgres @anthropic-ai/tokenizer nanoid next-auth@beta
+npm install postgres @anthropic-ai/tokenizer nanoid next-auth@5.0.0-beta.25
 ```
+
+> Pin to an exact `5.0.0-beta.<N>` version (do NOT float on `next-auth@beta`). If a newer beta is current when you install, run `npm install next-auth@beta` once, read the resolved version from `package.json`, and pin it explicitly (replace `5.0.0-beta.25` above with the resolved version).
 
 - [ ] **Step 2: Install dev deps**
 
@@ -233,10 +237,14 @@ git commit -m "feat(db): add initial schema migration"
 
 ```ts
 // scripts/migrate.ts
-import "dotenv/config";
+import { config as dotenvConfig } from "dotenv";
 import postgres from "postgres";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+
+// Next.js convention: .env.local overrides .env. Load both.
+dotenvConfig({ path: ".env.local" });
+dotenvConfig();
 
 async function main() {
   const url = process.env.DATABASE_URL;
@@ -264,6 +272,7 @@ async function main() {
     }
     const body = readFileSync(path.join(dir, file), "utf8");
     console.log(`[run]  ${file}`);
+    // Safe: migrations read from local fs, not user input.
     await sql.unsafe(body);
     await sql`INSERT INTO _migrations (id) VALUES (${file})`;
   }
@@ -632,7 +641,7 @@ export default auth((req) => {
 });
 
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"],
+  matcher: ["/((?!_next/static|_next/image|favicon.ico).*)"], // If /api/health is ever added for k8s probes, add it to this exclusion list.
 };
 ```
 
@@ -654,6 +663,10 @@ git commit -m "feat(auth): route gate via NextAuth middleware"
 
 ```ts
 // src/lib/tokens.ts
+// NOTE: Uses @anthropic-ai/tokenizer for all providers (Anthropic/OpenAI/Gemini/Qwen).
+// This is a conservative approximation — actual token counts on non-Anthropic providers
+// will differ. Monitor logs for "context exceeded" errors from provider SDKs; if they
+// appear, swap in provider-specific tokenizers (js-tiktoken for OpenAI, etc.).
 // @ts-expect-error – no bundled types
 import { countTokens } from "@anthropic-ai/tokenizer";
 
@@ -736,6 +749,16 @@ describe("sliceFromLatestCompaction", () => {
       mk(4, "user"),
     ];
     expect(sliceFromLatestCompaction(rows).map((m) => m.id)).toEqual([3, 4]);
+  });
+
+  it("returns [compaction] when compaction row is most recent", () => {
+    const rows = [
+      { id: 1, role: "user", content: "hi" },
+      { id: 2, role: "assistant", content: "hello" },
+      { id: 3, role: "compaction", content: "## Conversation summary\n..." },
+    ];
+    const result = sliceFromLatestCompaction(rows as any);
+    expect(result).toEqual([rows[2]]);
   });
 });
 ```
@@ -859,7 +882,7 @@ export async function setTitle(conversationId: string, title: string): Promise<v
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `npm test`
-Expected: PASS, 3 tests.
+Expected: PASS, 4 tests.
 
 - [ ] **Step 5: Commit**
 
@@ -1164,6 +1187,22 @@ export async function maybeCompact(
   });
   const ms = Date.now() - t0;
 
+  // I5: Validate summarizer output structure. Better to skip one compaction
+  // than to persist a malformed summary that will chain into future compactions.
+  const REQUIRED_HEADINGS = [
+    "## Conversation summary",
+    "### Current task",
+    "### Data focus",
+    "### Established findings",
+    "### Decisions made",
+    "### Open items",
+  ];
+  const missing = REQUIRED_HEADINGS.filter(h => !text.includes(h));
+  if (missing.length > 0) {
+    console.error("[compaction] summarizer output missing headings; skipping write", { missing });
+    return false;
+  }
+
   const preTokens = estimateMessagesTokens(toSummarize);
   const postTokens = estimateTokens(text);
 
@@ -1184,15 +1223,29 @@ export async function maybeCompact(
 }
 ```
 
-- [ ] **Step 2: Run tests to confirm nothing broke**
+- [ ] **Step 2: Add a mocked `maybeCompact` test**
+
+Append to `src/lib/__tests__/compaction.test.ts` a test that mocks `generateText` and asserts `maybeCompact` passes the correct message slice + honors the 25% keep budget. Adjust to match the actual exports in `compaction.ts`.
+
+```ts
+import { vi } from "vitest";
+vi.mock("ai", () => ({
+  generateText: vi.fn().mockResolvedValue({
+    text: "## Conversation summary\n### Current task\nx\n### Data focus\nx\n### Established findings\nx\n### Decisions made\nx\n### Open items\nx",
+  }),
+}));
+// test: when estimated tokens exceed threshold, splitForCompaction is called with correct indices
+```
+
+- [ ] **Step 3: Run tests to confirm nothing broke**
 
 Run: `npm test`
 Expected: all PASS.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add src/lib/compaction.ts
+git add src/lib/compaction.ts src/lib/__tests__/compaction.test.ts
 git commit -m "feat: summarizer call + maybeCompact orchestration"
 ```
 
@@ -1243,6 +1296,20 @@ function sanitize(raw: string): string {
     .slice(0, 60);
 }
 
+// I3: one retry with 2s backoff; swallow final failure (no user-facing surface).
+async function callWithOneRetry<T>(fn: () => Promise<T>): Promise<T | null> {
+  try { return await fn(); }
+  catch (err1) {
+    console.warn("[title] first attempt failed", err1 instanceof Error ? err1.message : err1);
+    await new Promise(r => setTimeout(r, 2000));
+    try { return await fn(); }
+    catch (err2) {
+      console.warn("[title] retry failed — leaving as 'New chat'", err2 instanceof Error ? err2.message : err2);
+      return null;
+    }
+  }
+}
+
 /** Fire-and-forget. Safe to call without awaiting. */
 export async function generateTitle(params: {
   conversationId: string;
@@ -1251,17 +1318,16 @@ export async function generateTitle(params: {
 }): Promise<void> {
   const model = pickTitler();
   if (!model) return;
-  try {
-    const { text } = await generateText({
+  const result = await callWithOneRetry(() =>
+    generateText({
       model,
       system: TITLE_SYSTEM,
       prompt: `User asked:\n${params.firstUserMessage.slice(0, 1500)}\n\nAssistant answered:\n${params.firstAssistantMessage.slice(0, 1500)}\n\nTitle:`,
-    });
-    const title = sanitize(text);
-    if (title) await setTitle(params.conversationId, title);
-  } catch (err) {
-    console.error("[title] failed", err);
-  }
+    })
+  );
+  if (!result) return; // both attempts failed; leave title as "New chat"
+  const title = sanitize(result.text);
+  if (title) await setTitle(params.conversationId, title);
 }
 ```
 
@@ -1471,6 +1537,7 @@ import {
 } from "@/lib/conversation";
 import { maybeCompact } from "@/lib/compaction";
 import { generateTitle } from "@/lib/title";
+import { sql } from "@/lib/db";
 
 export const maxDuration = 120;
 
@@ -1555,6 +1622,14 @@ ${compaction.content}
 </untrusted-summary>`;
 }
 
+// B3: same helper shape as Task 13's `toUIMessages`. Duplicated deliberately
+// (3 lines) to avoid a new shared module just for this. If this grows, hoist
+// it to `src/lib/conversation.ts`.
+function safeParse(raw: string | null): unknown {
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return raw; }
+}
+
 /** Build ai-sdk ModelMessages from DB rows (excluding the compaction). */
 function dbToModelMessages(rows: DbMessage[]): ModelMessage[] {
   const out: ModelMessage[] = [];
@@ -1585,7 +1660,8 @@ function dbToModelMessages(rows: DbMessage[]): ModelMessage[] {
             type: "tool-result",
             toolCallId: r.tool_call_id!,
             toolName: r.tool_name!,
-            output: { type: "json", value: r.content ? JSON.parse(r.content) : null },
+            // B3: safeParse instead of raw JSON.parse — malformed tool JSON must not 500 the stream.
+            output: { type: "json", value: safeParse(r.content) },
           },
         ],
       });
@@ -1608,27 +1684,47 @@ export async function POST(req: Request) {
   }
   const { conversationId, message } = parsed.data;
 
-  const conv = await getConversation(conversationId, session.user.id);
+  // B1: Per-conversation advisory lock + single transaction around all reads
+  // and the user-message append + compaction. Prevents two tabs from
+  // concurrently duplicating streams/compactions on the same conv.
+  // Advisory xact locks auto-release on commit/rollback.
+  //
+  // NOTE: `getConversation`, `appendMessage`, `loadMessages`, `maybeCompact`,
+  // `sliceFromLatestCompaction` must accept this `tx` binding or be refactored
+  // to run against it. Simplest path: temporarily swap their `sql` calls to
+  // `tx` via a module-level setter, or thread `tx` through their signatures.
+  // Pick whichever keeps the diff smallest for your codebase.
+  const { conv, effective, compaction, tail } = await sql.begin(async (tx) => {
+    // Serialize writes on this conversation — prevents two tabs from duplicating
+    // streams/compactions on the same conv. Auto-released on commit/rollback.
+    await tx`SELECT pg_advisory_xact_lock(hashtext(${conversationId}))`;
+
+    const conv = await getConversation(conversationId, session.user!.id);
+    if (!conv) return { conv: null, effective: [], compaction: null, tail: [] } as const;
+
+    // Persist the incoming user message first
+    await appendMessage({
+      conversation_id: conversationId,
+      role: "user",
+      content: message,
+    });
+
+    // Compact if over threshold (same tx — so the compaction row is visible to
+    // the reload below and the advisory lock still covers it).
+    await maybeCompact(conversationId, conv.model);
+
+    // Reload effective window
+    const all = await loadMessages(conversationId);
+    const effective = sliceFromLatestCompaction(all);
+    const compaction = effective[0]?.role === "compaction" ? effective[0] : null;
+    const tail = compaction ? effective.slice(1) : effective;
+    return { conv, effective, compaction, tail };
+  });
+
   if (!conv) return new Response("Conversation not found", { status: 404 });
 
   // model is authoritative from the DB, not the client
   const modelId = conv.model;
-
-  // Persist the incoming user message first
-  await appendMessage({
-    conversation_id: conversationId,
-    role: "user",
-    content: message,
-  });
-
-  // Compact if over threshold
-  await maybeCompact(conversationId, modelId);
-
-  // Reload effective window
-  const all = await loadMessages(conversationId);
-  const effective = sliceFromLatestCompaction(all);
-  const compaction = effective[0]?.role === "compaction" ? effective[0] : null;
-  const tail = compaction ? effective.slice(1) : effective;
 
   let languageModel;
   try {
@@ -1694,6 +1790,7 @@ export async function POST(req: Request) {
       },
     },
     stopWhen: stepCountIs(20),
+    // SECURITY: do NOT log tool inputs, ES responses, or user message content.
     onStepFinish: async ({ text, toolCalls, toolResults, finishReason }) => {
       // Persist assistant step (text + tool_calls) if there is anything
       if (text || (toolCalls && toolCalls.length > 0)) {
@@ -1710,16 +1807,23 @@ export async function POST(req: Request) {
           metadata: { model: modelId, finishReason },
         });
       }
-      // Persist each tool result
+      // Persist each tool result. I2: handle string-already outputs and guard
+      // each append so one bad serialization doesn't kill the whole step.
       if (toolResults) {
         for (const tr of toolResults) {
-          await appendMessage({
-            conversation_id: conversationId,
-            role: "tool",
-            content: JSON.stringify(tr.output),
-            tool_call_id: tr.toolCallId,
-            tool_name: tr.toolName,
-          });
+          const outputStr = typeof tr.output === "string" ? tr.output : JSON.stringify(tr.output);
+          try {
+            await appendMessage({
+              conversation_id: conversationId,
+              role: "tool",
+              content: outputStr,
+              tool_call_id: tr.toolCallId,
+              tool_name: tr.toolName,
+            });
+          } catch (err) {
+            // Log IDs only — never the tool content, input, or ES response body.
+            console.error("[tool persist failed]", { toolCallId: tr.toolCallId });
+          }
         }
       }
     },
@@ -1907,7 +2011,8 @@ export default function ConversationPage() {
             <span className="text-sm text-[#6B6B6B] truncate max-w-[320px]">{title}</span>
           </div>
           <div className="flex items-center gap-2">
-            <ModelSelector value={model} onChange={setModel} onModelsLoaded={() => setModelsReady(true)} />
+            {/* Model is frozen per-conversation; selector is read-only here. */}
+            <ModelSelector value={model} onChange={() => {}} disabled onModelsLoaded={() => setModelsReady(true)} />
             <ThemeToggle />
             <form action="/api/auth/signout" method="post">
               <button
@@ -2230,9 +2335,13 @@ import { sql } from "@/lib/db";
 const bodySchema = z.object({ email: z.string().email() });
 
 export async function POST(req: Request) {
+  // B2: JWT role is up to 12h stale; re-read from DB to handle demotion.
   const session = await auth();
-  const role = (session?.user as { role?: string } | undefined)?.role;
-  if (!session?.user?.id || role !== "admin") {
+  if (!session?.user?.id) return new NextResponse("Forbidden", { status: 403 });
+  const [row] = await sql<Array<{ role: string; status: string }>>`
+    SELECT role, status FROM users WHERE id = ${session.user.id}
+  `;
+  if (row?.role !== "admin" || row?.status !== "active") {
     return new NextResponse("Forbidden", { status: 403 });
   }
   const body = await req.json();
@@ -2307,15 +2416,15 @@ psql "$DATABASE_URL" -c "INSERT INTO invites (email, invited_by) VALUES ('collea
 
 Sign in as `colleague@99.co`. Expected: succeeds, row appears in `users` with `role='member'`, invite `consumed_at` set.
 
-- [ ] **Step 9: Verify compaction fires (optional stress test)**
+- [ ] **Step 9: Verify compaction fires on multiple providers**
 
-Lower `COMPACTION_THRESHOLD.qwen` temporarily to `3000` in `src/lib/compaction.ts`, restart dev, send a few turns, then check:
+Test on at least two providers: (a) set `conversations.model = 'qwen36-plus'` or similar non-Anthropic model — temporarily lower `COMPACTION_THRESHOLD` for that provider — send enough messages to trigger, verify a `role='compaction'` row appears. (b) Repeat for an Anthropic-path model if an `ANTHROPIC_API_KEY` is configured. This confirms both the summarizer (pinned to Haiku) and the per-provider threshold routing work end-to-end.
 
 ```bash
 psql "$DATABASE_URL" -c "SELECT id, role, LEFT(content, 80) FROM messages WHERE role='compaction';"
 ```
 
-Expected: at least one compaction row exists with the sectioned markdown skeleton. Revert the threshold. Commit revert.
+Expected: at least one compaction row exists per provider tested, each with the sectioned markdown skeleton. Revert the threshold. Commit revert.
 
 - [ ] **Step 10: Run unit tests**
 
