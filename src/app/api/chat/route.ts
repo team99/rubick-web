@@ -1,12 +1,13 @@
 // src/app/api/chat/route.ts
-import { streamText, stepCountIs, convertToModelMessages, type UIMessage, type ModelMessage, type JSONValue } from "ai";
+import { streamText, stepCountIs, type ModelMessage, type JSONValue } from "ai";
 import { after } from "next/server";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
+import { nanoid } from "nanoid";
 import { z } from "zod";
 import { auth } from "@/lib/auth";
-import { getModelConfig, MODELS } from "@/lib/models";
+import { getModelConfig } from "@/lib/models";
 import { getSlimContext, getSchemaFiles, getSchemaFileList } from "@/lib/es-context";
 import { executeESQuery } from "@/lib/es-client";
 import {
@@ -14,6 +15,8 @@ import {
   loadMessages,
   sliceFromLatestCompaction,
   appendMessage,
+  tryBeginStream,
+  endStream,
   type DbMessage,
 } from "@/lib/conversation";
 import { maybeCompact } from "@/lib/compaction";
@@ -166,23 +169,31 @@ export async function POST(req: Request) {
   }
   const { conversationId, message } = parsed.data;
 
+  // Stream-gate ID: uniquely identifies this POST's stream ownership.
+  // tryBeginStream atomically claims the slot inside the setup tx; a second
+  // concurrent POST on the same conversation returns 409 before streamText.
+  const streamId = nanoid();
+
   // B1: Per-conversation advisory lock + single transaction around all reads
   // and the user-message append + compaction. Prevents two tabs from
   // concurrently duplicating streams/compactions on the same conv.
   // Advisory xact locks auto-release on commit/rollback.
-  //
-  // NOTE: `getConversation`, `appendMessage`, `loadMessages`, `maybeCompact`,
-  // `sliceFromLatestCompaction` must accept this `tx` binding or be refactored
-  // to run against it. Simplest path: temporarily swap their `sql` calls to
-  // `tx` via a module-level setter, or thread `tx` through their signatures.
-  // Pick whichever keeps the diff smallest for your codebase.
-  const { conv, effective, compaction, tail } = await sql.begin(async (tx) => {
+  const { conv, compaction, tail, streamBusy } = await sql.begin(async (tx) => {
     // Serialize writes on this conversation — prevents two tabs from duplicating
     // streams/compactions on the same conv. Auto-released on commit/rollback.
     await tx`SELECT pg_advisory_xact_lock(hashtext(${conversationId}))`;
 
     const conv = await getConversation(conversationId, userId, tx);
-    if (!conv) return { conv: null, effective: [], compaction: null, tail: [] } as const;
+    if (!conv) {
+      return { conv: null, compaction: null, tail: [], streamBusy: false } as const;
+    }
+
+    // Claim the stream slot. If another stream is already active and fresh,
+    // bail out before we append the user message or compact.
+    const claimed = await tryBeginStream(conversationId, streamId, tx);
+    if (!claimed) {
+      return { conv, compaction: null, tail: [], streamBusy: true } as const;
+    }
 
     // Persist the incoming user message first
     await appendMessage({
@@ -200,10 +211,18 @@ export async function POST(req: Request) {
     const effective = sliceFromLatestCompaction(all);
     const compaction = effective[0]?.role === "compaction" ? effective[0] : null;
     const tail = compaction ? effective.slice(1) : effective;
-    return { conv, effective, compaction, tail };
+    return { conv, compaction, tail, streamBusy: false };
   });
 
   if (!conv) return new Response("Conversation not found", { status: 404 });
+  if (streamBusy) {
+    return new Response(
+      JSON.stringify({
+        error: "Another stream is in progress for this conversation. Please wait and retry.",
+      }),
+      { status: 409, headers: { "Content-Type": "application/json" } }
+    );
+  }
 
   // model is authoritative from the DB, not the client
   const modelId = conv.model;
@@ -212,6 +231,9 @@ export async function POST(req: Request) {
   try {
     languageModel = getLanguageModel(modelId);
   } catch (error) {
+    // Release the stream slot we claimed — otherwise this conversation is
+    // locked out for 2 minutes on a misconfigured model.
+    await endStream(conversationId, streamId);
     const msg = error instanceof Error ? error.message : "Model not available";
     return new Response(JSON.stringify({ error: msg }), {
       status: 400,
@@ -272,6 +294,17 @@ export async function POST(req: Request) {
       },
     },
     stopWhen: stepCountIs(20),
+    onError: async () => {
+      // Release the stream slot on SDK/provider errors so the conversation
+      // isn't locked out for 2 minutes.
+      await endStream(conversationId, streamId);
+    },
+    // Runs AFTER the setup tx has committed and the advisory lock is released.
+    // Concurrent writes on this conversation are prevented by active_stream_id
+    // (second concurrent POST returns 409 before reaching this point).
+    // Assistant-text rows have no DB-level dedup — concurrency control is at
+    // the stream gate above. Tool-result duplicates from SDK retries are
+    // handled by the partial unique index on (conversation_id, tool_call_id).
     // SECURITY: do NOT log tool inputs, ES responses, or user message content.
     onStepFinish: async ({ text, toolCalls, toolResults, finishReason }) => {
       // Persist assistant step (text + tool_calls) if there is anything
@@ -310,22 +343,32 @@ export async function POST(req: Request) {
       }
     },
     onFinish: async () => {
+      // Release the stream slot first so a follow-up POST isn't blocked
+      // while title generation runs.
+      await endStream(conversationId, streamId);
+
       // Kick title generation on first complete turn.
       // B3: use after() so serverless runtimes keep the task alive after the
       // response stream closes. Plain `void` is not guaranteed to run on Vercel.
+      // Re-read the title inside after() so the closure-captured `conv.title`
+      // doesn't trigger a redundant LLM call when two early turns race.
       if (conv.title === "New chat") {
-        const rows = await loadMessages(conversationId);
-        const firstUser = rows.find((r) => r.role === "user");
-        const firstAssistant = rows.find((r) => r.role === "assistant" && r.content);
-        if (firstUser && firstAssistant) {
-          after(
-            generateTitle({
+        after(async () => {
+          const [row] = await sql<Array<{ title: string }>>`
+            SELECT title FROM conversations WHERE id = ${conversationId}
+          `;
+          if (row?.title !== "New chat") return; // concurrent turn already titled it
+          const rows = await loadMessages(conversationId);
+          const firstUser = rows.find((r) => r.role === "user");
+          const firstAssistant = rows.find((r) => r.role === "assistant" && r.content);
+          if (firstUser && firstAssistant) {
+            await generateTitle({
               conversationId,
               firstUserMessage: firstUser.content ?? "",
               firstAssistantMessage: firstAssistant.content ?? "",
-            })
-          );
-        }
+            });
+          }
+        });
       }
     },
   });

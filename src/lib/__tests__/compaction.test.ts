@@ -197,4 +197,53 @@ describe("maybeCompact", () => {
     expect(appendMessageMock).not.toHaveBeenCalled();
     expect(result).toEqual({ compacted: false });
   });
+
+  it("rejects a summary that only embeds heading strings inside bullet text (I3)", async () => {
+    const { maybeCompact } = await import("@/lib/compaction");
+    const rows = bigConversation(40);
+    loadMessagesMock.mockResolvedValue(rows);
+    // Adversarial: looks like it contains the headings, but they're all
+    // inside bullet lines — not real line-anchored markdown headings.
+    const adversarial = [
+      "Here is a rundown:",
+      '- "## Conversation summary" was mentioned',
+      '- "### Current task" was mentioned',
+      '- "### Data focus" was mentioned',
+      '- "### Established findings" was mentioned',
+      '- "### Decisions made" was mentioned',
+      '- "### Open items" was mentioned',
+    ].join("\n");
+    generateTextMock.mockResolvedValue({ text: adversarial });
+
+    const result = await maybeCompact("c1", "qwen36-plus");
+
+    expect(generateTextMock).toHaveBeenCalledOnce();
+    expect(appendMessageMock).not.toHaveBeenCalled();
+    expect(result).toEqual({ compacted: false });
+  });
+
+  it("preserves the latest user message when a single message exceeds keepBudget (I1)", async () => {
+    const { maybeCompact } = await import("@/lib/compaction");
+    // Build a conversation where EVERY message is huge enough to individually
+    // exceed the 25% keep budget. Without the clamp, the backward walk would
+    // push keepFromIdx past the last user row, leaving toKeep empty.
+    const rows = bigConversation(40);
+    // Force the final row to be a user message so the clamp has a target.
+    rows[rows.length - 1] = {
+      ...rows[rows.length - 1],
+      role: "user",
+    };
+    loadMessagesMock.mockResolvedValue(rows);
+    generateTextMock.mockResolvedValue({ text: WELL_FORMED_SUMMARY });
+    appendMessageMock.mockResolvedValue({ id: 999 });
+
+    const result = await maybeCompact("c1", "qwen36-plus");
+
+    expect(result).toMatchObject({ compacted: true });
+    expect(appendMessageMock).toHaveBeenCalledOnce();
+    // toSummarize must stop BEFORE the last user row — i.e., the last
+    // summarized message id must be less than the final user message id.
+    const payload = appendMessageMock.mock.calls[0][0];
+    expect(payload.metadata.summarized_through_message_id).toBeLessThan(rows[rows.length - 1].id);
+  });
 });

@@ -21,6 +21,8 @@ export type DbConversation = {
   model: string;
   created_at: Date;
   updated_at: Date;
+  active_stream_id: string | null;
+  active_stream_started_at: Date | null;
 };
 
 export async function createConversation(
@@ -120,5 +122,45 @@ export async function setTitle(
   await db`
     UPDATE conversations SET title = ${title}
     WHERE id = ${conversationId} AND title = 'New chat'
+  `;
+}
+
+/**
+ * Try to claim the stream slot on a conversation. Returns true if acquired,
+ * false if another stream is already active and fresh. A stream older than
+ * 2 minutes is considered stale (covers server crashes) and can be taken over.
+ *
+ * This is the concurrency gate that prevents two tabs POSTing on the same
+ * conversation from interleaving `onStepFinish` assistant rows.
+ */
+export async function tryBeginStream(
+  conversationId: string,
+  streamId: string,
+  db: Db = sql
+): Promise<boolean> {
+  const rows = await db<Array<{ id: string }>>`
+    UPDATE conversations
+       SET active_stream_id = ${streamId}, active_stream_started_at = now()
+     WHERE id = ${conversationId}
+       AND (active_stream_id IS NULL
+            OR active_stream_started_at < now() - INTERVAL '2 minutes')
+     RETURNING id
+  `;
+  return rows.length > 0;
+}
+
+/**
+ * Release the stream slot — only if we still own it. Safe to call on error
+ * paths; a no-op when another stream has already taken over.
+ */
+export async function endStream(
+  conversationId: string,
+  streamId: string,
+  db: Db = sql
+): Promise<void> {
+  await db`
+    UPDATE conversations
+       SET active_stream_id = NULL, active_stream_started_at = NULL
+     WHERE id = ${conversationId} AND active_stream_id = ${streamId}
   `;
 }

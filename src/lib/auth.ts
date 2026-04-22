@@ -11,9 +11,10 @@ export const { handlers, auth, signIn, signOut } = NextAuth({
     ...authConfig.callbacks,
 
     async signIn({ user, profile }) {
-      // B6: require Google-verified email
+      // B6: require Google-verified email. Treat absence (or any non-true
+      // value) as unverified — fail closed instead of fail open.
       const verified = (profile as { email_verified?: boolean } | undefined)?.email_verified;
-      if (verified === false) return false;
+      if (verified !== true) return false;
 
       const email = user.email?.toLowerCase();
       if (!email) return false;
