@@ -1,75 +1,49 @@
-"use client";
+// src/app/login/page.tsx
+import { signIn } from "@/lib/auth";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
-
-export default function LoginPage() {
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
-  const router = useRouter();
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setError("");
-    setLoading(true);
-
-    try {
-      const res = await fetch("/api/auth", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
-      });
-
-      if (res.ok) {
-        router.push("/");
-      } else {
-        setError("Invalid password");
-      }
-    } catch {
-      setError("Something went wrong");
-    } finally {
-      setLoading(false);
-    }
-  }
-
+export default function LoginPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ error?: string }>;
+}) {
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[#FAFAF8] dark:bg-[#1A1A1A]">
-      <div className="w-full max-w-sm">
-        <div className="text-center mb-8">
-          <h1 className="text-2xl font-semibold text-[#1A1A1A] dark:text-[#E8E8E8]">
-            Rubick
-          </h1>
-          <p className="text-sm text-[#6B6B6B] dark:text-[#999999] mt-1">
-            Rumah123 Data Assistant
-          </p>
+    <main className="h-full flex items-center justify-center bg-[#FAFAF8] dark:bg-[#1A1A1A]">
+      <div className="w-full max-w-sm px-6 py-8 space-y-6">
+        <div className="text-center space-y-1">
+          <h1 className="text-xl font-semibold text-[#1A1A1A] dark:text-[#E8E8E8]">Rubick</h1>
+          <p className="text-sm text-[#6B6B6B]">Sign in to continue.</p>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Enter password"
-              className="w-full px-4 py-3 rounded-xl border border-[#E5E3DC] dark:border-[#333333] bg-white dark:bg-[#262626] text-[#1A1A1A] dark:text-[#E8E8E8] placeholder-[#6B6B6B] dark:placeholder-[#999999] focus:outline-none focus:ring-2 focus:ring-[#D97706]/40 text-sm"
-              autoFocus
-            />
-          </div>
-
-          {error && (
-            <p className="text-sm text-red-500 text-center">{error}</p>
-          )}
-
+        <form
+          action={async () => {
+            "use server";
+            await signIn("google", { redirectTo: "/" });
+          }}
+        >
           <button
             type="submit"
-            disabled={loading || !password}
-            className="w-full py-3 rounded-xl bg-[#1A1A1A] dark:bg-[#E8E8E8] text-white dark:text-[#1A1A1A] text-sm font-medium hover:opacity-90 disabled:opacity-50 transition-opacity"
+            className="w-full px-4 py-2 rounded-lg border border-[#E5E3DC] dark:border-[#333333] text-sm text-[#1A1A1A] dark:text-[#E8E8E8] hover:bg-[#F0EDE8] dark:hover:bg-[#333333] transition-colors"
           >
-            {loading ? "Signing in..." : "Continue"}
+            Continue with Google
           </button>
         </form>
+
+        <ErrorBanner searchParams={searchParams} />
       </div>
-    </div>
+    </main>
+  );
+}
+
+async function ErrorBanner({
+  searchParams,
+}: {
+  searchParams: Promise<{ error?: string }>;
+}) {
+  const { error } = await searchParams;
+  if (!error) return null;
+  return (
+    <p className="text-xs text-red-600 dark:text-red-400 text-center">
+      This app is invite-only. Ask erwin@99.co for access.
+    </p>
   );
 }
