@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { splitForCompaction } from "@/lib/compaction";
 import type { DbMessage } from "@/lib/conversation";
 
@@ -52,5 +52,149 @@ describe("splitForCompaction", () => {
     const { toSummarize, toKeep } = splitForCompaction(rows, 0);
     expect(toSummarize).toEqual([]);
     expect(toKeep.map((m) => m.id)).toEqual([1, 2]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// maybeCompact — mocked LLM + DB tests
+// ---------------------------------------------------------------------------
+
+const { generateTextMock, loadMessagesMock, appendMessageMock } = vi.hoisted(() => ({
+  generateTextMock: vi.fn(),
+  loadMessagesMock: vi.fn(),
+  appendMessageMock: vi.fn(),
+}));
+
+vi.mock("ai", () => ({
+  generateText: generateTextMock,
+}));
+
+vi.mock("@/lib/conversation", async () => {
+  // Re-export the real DbMessage type by importing from the real module is
+  // not needed — tests only use the runtime functions. DbMessage is a type-only
+  // import in the consumer.
+  return {
+    loadMessages: loadMessagesMock,
+    appendMessage: appendMessageMock,
+    sliceFromLatestCompaction: (rows: DbMessage[]) => {
+      let cutIdx = -1;
+      for (let i = rows.length - 1; i >= 0; i--) {
+        if (rows[i].role === "compaction") { cutIdx = i; break; }
+      }
+      return cutIdx === -1 ? rows : rows.slice(cutIdx);
+    },
+  };
+});
+
+const WELL_FORMED_SUMMARY = [
+  "## Conversation summary",
+  "Some summary text.",
+  "### Current task",
+  "Analyze April enquiries.",
+  "### Data focus",
+  "None.",
+  "### Established findings",
+  "None.",
+  "### Decisions made",
+  "None.",
+  "### Open items",
+  "None.",
+].join("\n");
+
+// Build a big conversation that exceeds the threshold for qwen36-plus (700_000).
+// Each message carries ~20k tokens worth of content (a long repeated string)
+// so ~40 messages easily exceed 700k.
+function bigConversation(n: number): DbMessage[] {
+  const chunk = "lorem ipsum dolor sit amet ".repeat(4000); // ~80k chars
+  const rows: DbMessage[] = [];
+  for (let i = 1; i <= n; i++) {
+    rows.push({
+      id: i,
+      conversation_id: "c1",
+      role: i % 2 === 1 ? "user" : "assistant",
+      content: chunk,
+      tool_calls: null,
+      tool_call_id: null,
+      tool_name: null,
+      metadata: null,
+      created_at: new Date(),
+    });
+  }
+  return rows;
+}
+
+describe("maybeCompact", () => {
+  beforeEach(() => {
+    generateTextMock.mockReset();
+    loadMessagesMock.mockReset();
+    appendMessageMock.mockReset();
+    // Ensure pickSummarizer finds a key.
+    process.env.ANTHROPIC_API_KEY = "test-key";
+  });
+
+  it("returns compacted=false and does not call generateText when under threshold", async () => {
+    const { maybeCompact } = await import("@/lib/compaction");
+    loadMessagesMock.mockResolvedValue([
+      mk(1, "user"),
+      mk(2, "assistant"),
+      mk(3, "user"),
+    ]);
+
+    const result = await maybeCompact("c1", "qwen36-plus");
+
+    expect(result).toEqual({ compacted: false });
+    expect(generateTextMock).not.toHaveBeenCalled();
+    expect(appendMessageMock).not.toHaveBeenCalled();
+  });
+
+  it("writes a compaction row with well-formed metadata when summarizer returns valid markdown", async () => {
+    const { maybeCompact } = await import("@/lib/compaction");
+    const rows = bigConversation(40);
+    loadMessagesMock.mockResolvedValue(rows);
+    generateTextMock.mockResolvedValue({ text: WELL_FORMED_SUMMARY });
+    appendMessageMock.mockResolvedValue({ id: 999 });
+
+    const result = await maybeCompact("c1", "qwen36-plus");
+
+    expect(generateTextMock).toHaveBeenCalledOnce();
+    expect(appendMessageMock).toHaveBeenCalledOnce();
+    const payload = appendMessageMock.mock.calls[0][0];
+    expect(payload.conversation_id).toBe("c1");
+    expect(payload.role).toBe("compaction");
+    expect(payload.content).toBe(WELL_FORMED_SUMMARY);
+    expect(payload.metadata).toMatchObject({
+      prompt_version: "compaction_prompt_v1",
+    });
+    expect(typeof payload.metadata.summarized_through_message_id).toBe("number");
+    expect(typeof payload.metadata.pre_tokens).toBe("number");
+    expect(typeof payload.metadata.post_tokens).toBe("number");
+    expect(typeof payload.metadata.summarizer_model).toBe("string");
+    expect(result).toMatchObject({ compacted: true, summary: WELL_FORMED_SUMMARY });
+  });
+
+  it("refuses to persist a malformed summary missing required headings (I5)", async () => {
+    const { maybeCompact } = await import("@/lib/compaction");
+    const rows = bigConversation(40);
+    loadMessagesMock.mockResolvedValue(rows);
+    // Missing "### Open items"
+    const malformed = [
+      "## Conversation summary",
+      "x",
+      "### Current task",
+      "x",
+      "### Data focus",
+      "x",
+      "### Established findings",
+      "x",
+      "### Decisions made",
+      "x",
+    ].join("\n");
+    generateTextMock.mockResolvedValue({ text: malformed });
+
+    const result = await maybeCompact("c1", "qwen36-plus");
+
+    expect(generateTextMock).toHaveBeenCalledOnce();
+    expect(appendMessageMock).not.toHaveBeenCalled();
+    expect(result).toEqual({ compacted: false });
   });
 });
