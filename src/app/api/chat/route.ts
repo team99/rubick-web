@@ -40,6 +40,120 @@ const PROVIDER_KEY_MAP = {
   qwen: "DASHSCOPE_API_KEY",
 } as const;
 
+// Sentinels for Qwen reasoning content. Unicode math brackets (U+27E8 / U+27E9)
+// chosen because they won't collide with markdown, code, or ES field values.
+// Kept in sync with splitThinking() in src/components/chat/message-bubble.tsx.
+const THINK_OPEN = "\u27E8think\u27E9";
+const THINK_CLOSE = "\u27E8/think\u27E9";
+
+/**
+ * Custom fetch for the Qwen (DashScope OpenAI-compat) branch. Two jobs:
+ *
+ * 1. Opt into Qwen-3 reasoning by setting `enable_thinking: true` on the
+ *    outgoing JSON body. DashScope only streams `delta.reasoning_content`
+ *    when this is on.
+ *
+ * 2. On SSE responses, transform each `data: {...}` line: rewrite any
+ *    `delta.reasoning_content` into `delta.content` wrapped in ⟨think⟩…⟨/think⟩.
+ *    @ai-sdk/openai drops `reasoning_content` (it only maps OpenAI o* models'
+ *    `reasoning` field), so without this shim Qwen's thinking is lost.
+ *
+ * Scoped to Qwen only — never wired into other providers.
+ */
+function rewriteSSELine(line: string): string {
+  if (!line.startsWith("data: ")) return line;
+  const payload = line.slice(6).trim();
+  if (!payload || payload === "[DONE]") return line;
+  try {
+    const json = JSON.parse(payload) as {
+      choices?: Array<{ delta?: { content?: string; reasoning_content?: string } }>;
+    };
+    if (!Array.isArray(json.choices)) return line;
+    let rewrote = false;
+    for (const c of json.choices) {
+      const r = c.delta?.reasoning_content;
+      if (r) {
+        c.delta!.content = `${c.delta!.content ?? ""}${THINK_OPEN}${r}${THINK_CLOSE}`;
+        delete c.delta!.reasoning_content;
+        rewrote = true;
+      }
+    }
+    return rewrote ? `data: ${JSON.stringify(json)}` : line;
+  } catch {
+    return line;
+  }
+}
+
+const qwenFetch: typeof fetch = async (input, init) => {
+  let body = init?.body;
+  let injected = false;
+  if (typeof body === "string") {
+    try {
+      const parsed = JSON.parse(body) as Record<string, unknown>;
+      parsed.enable_thinking = true;
+      // Some DashScope models also require stream_options and a specific knob.
+      // incremental_output is a DashScope native flag; harmless on compat path.
+      parsed.stream_options = { include_usage: true };
+      body = JSON.stringify(parsed);
+      injected = true;
+    } catch {
+      // non-JSON body — pass through untouched
+    }
+  }
+  console.log("[qwenFetch]", { injected, hasBody: typeof body === "string" });
+  const res = await fetch(input, { ...init, body });
+
+  const ct = res.headers.get("content-type") ?? "";
+  console.log("[qwenFetch] response", { status: res.status, contentType: ct });
+  if (!res.ok || !ct.includes("text/event-stream") || !res.body) {
+    if (!res.ok) {
+      // Tee the body so we can log the error without consuming the stream.
+      const [a, b] = res.body ? res.body.tee() : [null, null];
+      if (a && b) {
+        a.pipeTo(new WritableStream({
+          write(chunk) {
+            try { console.log("[qwenFetch] error body:", new TextDecoder().decode(chunk)); } catch {}
+          },
+        })).catch(() => {});
+        return new Response(b, { status: res.status, statusText: res.statusText, headers: res.headers });
+      }
+    }
+    return res;
+  }
+
+  let buffer = "";
+  let sawReasoning = false;
+  const lineTransform = new TransformStream<string, string>({
+    transform(chunk, controller) {
+      buffer += chunk;
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (!sawReasoning && line.includes("reasoning_content")) {
+          sawReasoning = true;
+          console.log("[qwenFetch] first reasoning_content delta seen");
+        }
+        controller.enqueue(rewriteSSELine(line) + "\n");
+      }
+    },
+    flush(controller) {
+      if (buffer) controller.enqueue(rewriteSSELine(buffer));
+      console.log("[qwenFetch] stream closed", { sawReasoning });
+    },
+  });
+
+  const transformed = res.body
+    .pipeThrough(new TextDecoderStream())
+    .pipeThrough(lineTransform)
+    .pipeThrough(new TextEncoderStream());
+
+  return new Response(transformed, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: res.headers,
+  });
+};
+
 function getLanguageModel(modelId: string) {
   const config = getModelConfig(modelId);
   const envKey = PROVIDER_KEY_MAP[config.provider];
@@ -54,25 +168,34 @@ function getLanguageModel(modelId: string) {
       return createOpenAI({
         apiKey,
         baseURL: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+        fetch: qwenFetch,
       })(config.modelId);
   }
 }
 
 function buildSystemPrompt(compaction: DbMessage | null): string {
   const schemaIds = getSchemaFileList();
-  const base = `You are Rubick, a data assistant for Rumah123 and iProperty. You help users query and analyze data from Elasticsearch indices.
+  const preloaded = getSchemaFiles(["enquiries", "users"]);
+  const base = `# MUST / MUST NOT — hard rules, read these first
+
+1. MUST call \`get_schema\` before querying any index that is NOT listed under "Pre-loaded schemas" below. Never guess field names.
+2. MUST NOT guess index names. If unsure, call \`get_schema\` with candidate identifiers or ask the user. Valid identifiers: ${schemaIds.join(", ")}.
+3. MUST batch ID lookups using a single Elasticsearch \`terms\` query. NEVER issue one \`execute_es_query\` per ID — that is forbidden.
+4. MUST limit yourself to ≤6 tool calls per turn. If you cannot answer within that budget, STOP and explain what blocked you instead of calling more tools.
+
+---
+
+You are Rubick, a data assistant for Rumah123 and iProperty. You help users query and analyze data from Elasticsearch indices.
 
 You have two tools:
-1. **get_schema** — Load detailed field documentation for specific indices. Call this FIRST before querying to learn exact field names, types, and enum values. Available schemas: ${schemaIds.join(", ")}
+1. **get_schema** — Load detailed field documentation for specific indices.
 2. **execute_es_query** — Execute an Elasticsearch query.
 
 Workflow:
-1. Read the index overview below to identify which indices you need
-2. Call get_schema to load their detailed schemas (typically 1-3 indices)
-3. Call execute_es_query with accurate field names from the schema
-4. Present results clearly with tables, bold numbers, and concise summaries
-
-For simple queries using only fields listed in the "Key Fields per Index" table below (e.g., count by date, filter by status), you may skip get_schema and query directly.
+1. Check the pre-loaded schemas below — if your query only needs \`enquiries\` and/or \`users\`, skip \`get_schema\` entirely.
+2. For any other index, call \`get_schema\` FIRST to learn exact field names and enum values.
+3. Call \`execute_es_query\` with accurate field names from the schema.
+4. Present results clearly with tables, bold numbers, and concise summaries.
 
 Important guidelines:
 - Always briefly explain your plan before calling tools.
@@ -81,7 +204,8 @@ Important guidelines:
 - Always exclude deleted records with instance_info.is_removed: false where applicable.
 - For active listings, filter by status: "1".
 - For agents, filter by type.value: 1.
-- Use .keyword suffix for exact string matches on text fields.
+- Append \`.keyword\` ONLY when the schema shows the field type as \`text\`. If the schema shows the field is already \`keyword\`, use the field name as-is (e.g. \`users.uuid\` is \`keyword\` — query it as \`uuid\`, NOT \`uuid.keyword\`).
+- If a query returns 0 results, do NOT re-issue the same query. Re-read the schema for field types — especially whether \`.keyword\` applies — before retrying.
 - Prices are in IDR (Indonesian Rupiah) for Rumah123, SGD for iProperty.
 - When showing prices, format them readably (e.g., "1.5B IDR" instead of "1500000000").
 - Keep your answers concise and data-driven.
@@ -89,7 +213,13 @@ Important guidelines:
 
 ---
 
-${getSlimContext()}`;
+${getSlimContext()}
+
+---
+
+## Pre-loaded schemas (no need to call get_schema for these)
+
+${preloaded}`;
 
   if (!compaction) return base;
 
@@ -116,6 +246,16 @@ function safeParse(raw: string | null): unknown {
 
 /** Build ai-sdk ModelMessages from DB rows (excluding the compaction). */
 function dbToModelMessages(rows: DbMessage[]): ModelMessage[] {
+  // Providers reject any assistant tool_call whose matching tool result is
+  // missing ("Tool result is missing for tool call ..."). Orphans can exist
+  // after an aborted or step-count-truncated stream. Pre-compute the set of
+  // tool_call_ids that actually have a result row, then drop any tool_call
+  // without a match when serializing the assistant step.
+  const resolvedToolCallIds = new Set<string>();
+  for (const r of rows) {
+    if (r.role === "tool" && r.tool_call_id) resolvedToolCallIds.add(r.tool_call_id);
+  }
+
   const out: ModelMessage[] = [];
   for (const r of rows) {
     if (r.role === "compaction") continue;
@@ -130,10 +270,13 @@ function dbToModelMessages(rows: DbMessage[]): ModelMessage[] {
       if (r.content) content.push({ type: "text", text: r.content });
       if (Array.isArray(r.tool_calls)) {
         for (const tc of r.tool_calls as Array<{ id: string; name: string; args: unknown }>) {
+          if (!resolvedToolCallIds.has(tc.id)) continue; // skip orphaned tool_call
           content.push({ type: "tool-call", toolCallId: tc.id, toolName: tc.name, input: tc.args });
         }
       }
-      out.push({ role: "assistant", content });
+      // If nothing survived, skip this assistant row entirely rather than
+      // emitting an empty-content message.
+      if (content.length > 0) out.push({ role: "assistant", content });
       continue;
     }
     if (r.role === "tool") {
@@ -246,11 +389,20 @@ export async function POST(req: Request) {
   }
 
   const modelMessages = dbToModelMessages(tail);
+  const providerIsQwen = getModelConfig(modelId).provider === "qwen";
+
+  // Per-request guard: if the same (index, query) returns 0 hits twice in a
+  // row within this turn, short-circuit with an instructive error so the model
+  // breaks the loop instead of re-issuing the same broken query (typically a
+  // wrong `.keyword` suffix on an already-keyword field).
+  const zeroHitRepeats = new Map<string, number>();
 
   const result = streamText({
     model: languageModel,
     system: buildSystemPrompt(compaction),
     messages: modelMessages,
+    // Qwen loops when sampling is too hot; Claude/GPT/Gemini keep their defaults.
+    ...(providerIsQwen ? { temperature: 0.1 } : {}),
     tools: {
       get_schema: {
         description:
@@ -274,11 +426,45 @@ export async function POST(req: Request) {
           query: z.record(z.string(), z.unknown()),
         }),
         execute: async ({ index, query }: { index: string; query: Record<string, unknown> }) => {
+          const dedupeKey = `${index}:${JSON.stringify(query)}`;
           try {
             const esResult = await executeESQuery(index, query);
             const hits = (esResult.hits as Record<string, unknown>) || {};
             const total = hits.total;
             const hitsArray = (hits.hits as Array<Record<string, unknown>>) || [];
+            const aggs = esResult.aggregations ?? null;
+
+            // Zero-hit / empty-agg repeat guard. We treat a result as "empty"
+            // when there are no hits AND no aggregation buckets contain data.
+            // For agg-only queries (size:0), hitsCount is naturally 0, so we
+            // also require the agg payload to be absent or trivially small.
+            const totalValue =
+              typeof total === "object" && total !== null
+                ? (total as { value?: number }).value ?? 0
+                : typeof total === "number"
+                  ? total
+                  : 0;
+            const isEmpty = hitsArray.length === 0 && totalValue === 0 && !aggs;
+            if (isEmpty) {
+              const prev = zeroHitRepeats.get(dedupeKey) ?? 0;
+              const next = prev + 1;
+              zeroHitRepeats.set(dedupeKey, next);
+              if (next >= 2) {
+                console.warn("[chat] repeat zero-hit guard tripped", {
+                  conversationId,
+                  index,
+                  repeats: next,
+                });
+                return {
+                  error:
+                    "This exact query has already returned 0 results once. Do NOT re-issue it. " +
+                    "Re-read the schema for this index: most likely cause is an incorrect `.keyword` suffix " +
+                    "(only `text` fields have a `.keyword` subfield — fields already typed `keyword` must be " +
+                    "queried by their plain name), or a wrong field path. Change the query or explain what you need.",
+                };
+              }
+            }
+
             return {
               total,
               hits_count: hitsArray.length,
@@ -297,7 +483,7 @@ export async function POST(req: Request) {
         },
       },
     },
-    stopWhen: stepCountIs(20),
+    stopWhen: stepCountIs(30),
     onError: async ({ error }) => {
       console.error("[chat stream error]", error instanceof Error ? error.message : error);
       // Release the stream slot on SDK/provider errors so the conversation
